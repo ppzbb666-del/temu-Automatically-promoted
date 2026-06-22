@@ -3349,6 +3349,19 @@ try {
   process.env.SELECTOR_DIAGNOSIS_DIRS = previousSessionDiagnosisDirs
 }
 
+// The session-health scenario above started a queue daemon that recorded a
+// login/CAPTCHA pause in the global queue-daemon audit ledger. That audit
+// blocker is not diagnosis-dir scoped, so the recovery diagnosis written inside
+// the isolated session dir is no longer visible once SELECTOR_DIAGNOSIS_DIRS is
+// restored. Capture a fresh real-page diagnosis here to prove the session
+// recovered before exercising the selector-config startup block below.
+writeRealSelectorDiagnosis(
+  "dianxiaomi-diagnosis-unit-selector-override-session-recovered.json",
+  readyWorkItemForCalibrationGate.pageUrl,
+  "Selector override session recovered real Dianxiaomi calibration",
+  60 * 1000
+)
+
 process.env.ALLOW_DIANXIAOMI_SMOKE_URLS = "true"
 const previousFixtureOverrideTickId = getDianxiaomiQueueDaemonState().ticks[0]?.id ?? null
 const fixtureOverrideStarted = startDianxiaomiQueueDaemon({
