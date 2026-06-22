@@ -64,6 +64,31 @@ export const calculatePricing = (
       `按汇率 ${rules.exchangeRateCnyPerUsd} 将采购成本和国内运费折算为美元`,
       `按重量 ${product.estimatedWeightKg} kg 使用物流规则 ${tierDescription}，物流成本 $${logistics.amountUsd}`,
       `保留 $${rules.platformFeeUsd} 平台费和 ${Math.round(rules.targetMarginRate * 100)}% 目标毛利空间`
-    ]
+    ],
+    // P1-4: stamp the analysis with the rules hash + computed time so the
+    // queue-run layer can detect stale prices before exporting a task.
+    rulesHash: hashPricingRules(rules),
+    computedAt: new Date().toISOString()
   }
+}
+
+// P1-4: stable hash of the pricing-rule fields that affect suggestedPriceUsd.
+// Used by `recomputeDraftPricingIfStale` to detect when the operator
+// changed pricing rules since the last draft rebuild.
+export const hashPricingRules = (rules: PricingRules): string => {
+  const projection = {
+    exchangeRate: rules.exchangeRateCnyPerUsd,
+    platformFee: rules.platformFeeUsd,
+    targetMargin: rules.targetMarginRate,
+    priceMultiplier: rules.priceMultiplier,
+    minimumSuggestedPrice: rules.minimumSuggestedPriceUsd,
+    logisticsUsdPerKg: rules.logisticsUsdPerKg,
+    tiers: (rules.logisticsRateTiers ?? []).map((t) => [
+      t.minWeightKg,
+      t.maxWeightKg ?? null,
+      t.baseFeeUsd,
+      t.usdPerKg
+    ])
+  }
+  return JSON.stringify(projection)
 }

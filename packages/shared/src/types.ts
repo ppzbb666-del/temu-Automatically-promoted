@@ -30,6 +30,9 @@ export type DianxiaomiCollectedSku = {
 
 export type DianxiaomiCollectedProduct = {
   id: string
+  storeId?: string
+  storeName?: string
+  sourceBucket?: AutomationSourceBucket
   pageUrl: string
   pageTitle: string
   collectedAt: string
@@ -104,6 +107,17 @@ export type DianxiaomiListingRequirementRules = {
     maxHeightPx: number
     maxSizeMb: number
     dianxiaomiTools: string[]
+    // P1-12: allowed aspect-ratio range for listing images (width/height).
+    // Temu description images accept 0.5–2; carousel images should stay
+    // near 1:1. When `minAspectRatio`/`maxAspectRatio` are set and the
+    // snapshot reports per-image dimensions, out-of-range images are flagged.
+    minAspectRatio?: number
+    maxAspectRatio?: number
+    // P1-11: when true, listing images must be confirmed English-only /
+    // watermark-free. The check is satisfied by a Dianxiaomi 图片检测
+    // (image check) signal or an explicit snapshot flag; absent evidence
+    // is a recommended-level warning, present-and-failed is required-level.
+    requireEnglishOnlyImages?: boolean
   }
   sku: {
     required: boolean
@@ -126,6 +140,20 @@ export type DianxiaomiListingRequirementRules = {
     required: boolean
     blockedTerms: string[]
   }
+  // P1-3: per-category overrides. When a DianxiaomiProductWorkItem.snapshot
+  // contains a category hint, the requirement checks for size chart / manual
+  // document / video metadata are pulled from these overrides. Categories
+  // not in this map fall back to the global `listingMetadata` defaults.
+  categoryRules?: Record<string, DianxiaomiCategoryRule>
+}
+
+// P1-3: per-category requirement override. All flags default to the global
+// rule when omitted.
+export type DianxiaomiCategoryRule = {
+  requireSizeChart?: boolean
+  requireManualDocument?: boolean
+  requireVideo?: boolean
+  requiredAttributes?: string[]
 }
 
 export type DianxiaomiListingRequirementCheck = {
@@ -228,6 +256,9 @@ export type DianxiaomiPublishOutcome = {
 export type DianxiaomiProductWorkItem = {
   id: string
   source: "dianxiaomi"
+  storeId?: string
+  storeName?: string
+  sourceBucket?: AutomationSourceBucket
   collectedProductId?: string
   pageUrl: string
   pageTitle: string
@@ -237,6 +268,11 @@ export type DianxiaomiProductWorkItem = {
   updatedAt: string
   rawTextSample: string
   notes: string[]
+  // P1-6: stable dedupe key computed from pageUrl + first product-image
+  // hash. Used by the work-item admission endpoint to detect duplicate
+  // products (same source page or same primary image) and update the
+  // existing item instead of creating a new one.
+  dedupeKey?: string
   snapshot: {
     hasTitle: boolean
     imageCount: number
@@ -250,8 +286,32 @@ export type DianxiaomiProductWorkItem = {
       maxWidthPx: number
       maxHeightPx: number
       unknownDimensionCount: number
+      // P1-12: min/max aspect ratio (width/height) seen across product
+      // images. Populated by the snapshot collector when dimensions are
+      // known. Used to flag out-of-range images.
+      minAspectRatio?: number
+      maxAspectRatio?: number
+    }
+    // P1-11: Dianxiaomi 图片检测 (image check) outcome when available.
+    // `passed` means the page-level image check confirmed no non-English
+    // text / watermark; undefined means the check has not run yet.
+    imageCheck?: {
+      passed: boolean
+      issues?: Array<{
+        // fixed category bucket surfaced by Dianxiaomi image-check UI,
+        // e.g. carousel image / product image / description image / SKU image.
+        category: string
+        // stable issue summary such as size, aspect ratio, non-english text.
+        issue: string
+        detail?: string
+      }>
     }
     mediaToolSignals?: string[]
+    // P1-9: target country/language for the listing's media. A single
+    // listing cannot upload product media in multiple country languages
+    // at the same time. The value is the BCP-47 locale (e.g. "en-US",
+    // "ja-JP", "fr-FR"). When omitted, the global default is "en".
+    targetLanguage?: string
   }
   requirements: {
     presetName: string
@@ -283,6 +343,31 @@ export type DianxiaomiProductWorkItemRetryAfterFixResult = {
   reason: string
 }
 
+export type DianxiaomiPageContext = {
+  storeId?: string
+  storeName?: string
+  availableStores?: Array<{
+    storeId?: string
+    storeName: string
+  }>
+  siteName?: string
+  pageUrl: string
+  pageTitle?: string
+  pageProfile?: string
+  updatedAt: string
+}
+
+export type DianxiaomiStoreMetrics = {
+  storeId?: string
+  storeName?: string
+  workItemCount: number
+  readyCount: number
+  collectedCount: number
+  blockedCount: number
+  needsRevisionCount: number
+  editedCount: number
+}
+
 export type DianxiaomiRepairPreviewFile = {
   workItemId: string
   pageUrl: string
@@ -309,6 +394,12 @@ export type PricingAnalysis = {
   estimatedPlatformFeeUsd: number
   estimatedLogisticsUsd: number
   rationale: string[]
+  // P1-4: fingerprint + timestamp of the pricing rules used to compute this
+  // analysis. The queue-run layer compares `rulesHash` against the current
+  // rules hash and re-runs `calculatePricing` when they mismatch or when
+  // `computedAt` is older than the configured staleness window.
+  rulesHash?: string
+  computedAt?: string
 }
 
 export type PricingRules = {
@@ -337,6 +428,13 @@ export type ListingDraft = {
   categoryPath: string[]
   attributes: Record<string, string>
   skuPricing: ListingSkuPricing[]
+  // P1-8: platform-level discoverability fields surfaced to Temu and
+  // used by the listing editor's SEO panel. searchKeywords appear in
+  // Temu's "search terms" field; tags drive marketplace filters;
+  // bulletPoints show as 5-bullet highlights on the listing detail page.
+  searchKeywords?: string[]
+  tags?: string[]
+  bulletPoints?: string[]
 }
 
 export type ListingSkuPricing = {
@@ -346,6 +444,11 @@ export type ListingSkuPricing = {
   stock: number
   attributes: Record<string, string>
   attributeSummary: string
+  // P1-8: per-SKU platform fields. variantBarcode maps to the Temu
+  // SKU barcode field; variantImageUrl is the optional per-SKU image
+  // override shown in the variant picker.
+  variantBarcode?: string
+  variantImageUrl?: string
 }
 
 export type ExecutionStepStatus = "pending" | "running" | "done" | "failed"
@@ -511,6 +614,27 @@ export type SelectorDiagnosisReport = {
       inputCount: number
     }>
   }
+  // P0-D: optional media-action sampling report. Captures the per-tool
+  // outcome (`sampled` for dialog-based apply path, `instant-action-recognized`
+  // for in-page actions like 一键翻译 / 图片检测, `no-dialog` / `close-failed`
+  // / etc. for the calibration failures).
+  mediaActionSampling?: {
+    enabled: boolean
+    tools: SelectorMediaActionSamplingTool[]
+  }
+}
+
+// P0-D: per-tool result of the media-action sampler. `instant-action-recognized`
+// is the new status for tools whose entry click acts on the page in place
+// rather than opening a closeable dialog.
+export type SelectorMediaActionSamplingTool = {
+  id: string
+  configKey: string
+  status: "sampled" | "missing-tool" | "no-dialog" | "close-failed" | "failed" | "skipped" | "instant-action-recognized"
+  sampledButtonCount: number
+  reason: string
+  entryText?: string
+  error?: string
 }
 
 export type DianxiaomiSelectorConfig = {
@@ -729,16 +853,23 @@ export type SelectorCalibrationJobLog = {
 
 export type MediaAutomationMode = "plan-only" | "unattended-open" | "unattended-apply"
 
+export type AutomationSourceBucket = "collection-box" | "pending-publish" | "listing-draft"
+
 export type AutomationDryRunStartInput = Partial<{
   url: string
   taskFile: string
   repairPlanFile: string
+  storeId: string
+  storeName: string
+  itemUrls: string[]
+  sourceBuckets: AutomationSourceBucket[]
   headed: boolean
   profile: string
   screenshots: string
   selectorConfig: string
   mediaAutomationMode: MediaAutomationMode
   mediaAutomationTools: string[]
+  skipDraftFill: boolean
   submitAfterSave: boolean
   submitMaxAttempts: number
 }>
@@ -852,6 +983,10 @@ export type AutomationQueueRunStartInput = AutomationFullFlowStartInput & Partia
 export type AutomationQueueRunStartResult = {
   id: string
   startedAt: string
+  storeId?: string
+  storeName?: string
+  itemUrls?: string[]
+  sourceBuckets?: AutomationSourceBucket[]
   limit: number
   queued: number
   skipped: number
@@ -1009,6 +1144,7 @@ export type AutomationQueueDaemonTick = {
     | "system-error"
     | "daemon-paused"
     | "tick-already-running"
+    | "awaiting-flow-completion"
     | "flow-outcome-recovered"
     | "recovery-run-started"
     | "validation-rerun-started"
@@ -1289,6 +1425,7 @@ export type AutomationQueueDaemonAuditDecision =
   | "recovery-started"
   | "validation-rerun-started"
   | "queue-started"
+  | "awaiting-flow-completion"
   | "outcomes-recovered"
   | "idle"
   | "failed"
@@ -1370,6 +1507,7 @@ export type AutomationQueueDaemonRecommendationKind =
   | "continue-running"
   | "start-daemon"
   | "wait-for-products"
+  | "wait-for-running-flow"
   | "run-calibration"
   | "resolve-login-or-captcha"
   | "regenerate-repair-plan"

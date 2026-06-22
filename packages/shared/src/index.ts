@@ -1,4 +1,7 @@
 export * from "./types"
+export * from "./dianxiaomi-account-scan"
+export * from "./dianxiaomi-image-check"
+export * from "./automation-scope"
 export * from "./mock"
 export * from "./pricing"
 export * from "./content"
