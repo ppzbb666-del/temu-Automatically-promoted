@@ -10,6 +10,9 @@ type SnapshotField = {
   ariaLabel: string
   valuePreview: string
   selectorHint: string
+  labelText?: string
+  columnHeaderText?: string
+  contextText?: string
   nearbyText: string
 }
 
@@ -52,7 +55,7 @@ type Candidate = {
 }
 
 const FIELD_KEYWORDS = {
-  title: ["商品标题", "产品标题", "刊登标题", "平台标题", "标题", "title", "name"],
+  title: ["商品标题", "产品标题", "刊登标题", "平台标题", "标题", "title"],
   description: ["商品描述", "产品描述", "详情描述", "刊登描述", "描述", "description", "details"],
   price: ["申报价", "建议售价", "刊登价", "销售价", "售价", "价格", "price", "sale price"],
   stock: ["库存", "刊登库存", "可售库存", "数量", "stock", "quantity", "available"],
@@ -75,9 +78,9 @@ const scoreText = (text: string, keywords: readonly string[]) => {
 const MEDIA_TOOL_KEYWORDS = {
   imageTranslation: ["图片翻译", "翻译图片", "image translation", "translate image", "translate"],
   whiteBackground: ["图片白底", "白底图", "白底", "white background", "remove background"],
-  imageEditor: ["小秘美图", "美图", "图片编辑", "image editor", "edit image"],
-  batchResize: ["批量改大小", "改大小", "图片大小", "resize", "batch resize"],
-  imageManagement: ["图片管理", "图片空间", "image management", "image space"]
+  imageEditor: ["小秘美图", "美图", "图片编辑", "编辑图片", "批量编辑", "image editor", "edit image"],
+  batchResize: ["批量改图片尺寸", "批量改大小", "改大小", "图片大小", "图片尺寸", "resize", "batch resize"],
+  imageManagement: ["图片检测", "检测图片", "图片管理", "图片空间", "image management", "image space"]
 } as const
 
 const MEDIA_TOOL_ACTION_KEYWORDS = {
@@ -86,6 +89,9 @@ const MEDIA_TOOL_ACTION_KEYWORDS = {
 } as const
 
 const fieldSearchText = (field: SnapshotField) => [
+  field.labelText ?? "",
+  field.columnHeaderText ?? "",
+  field.contextText ?? "",
   field.name,
   field.placeholder,
   field.ariaLabel,
@@ -187,13 +193,20 @@ const loadSnapshot = (snapshotPath: string): DianxiaomiSnapshot =>
 
 const diagnoseSnapshot = (snapshot: DianxiaomiSnapshot) => {
   const fields = Object.fromEntries(
-    Object.entries(FIELD_KEYWORDS).map(([kind, keywords]) => [
-      kind,
-      {
-        ok: topCandidates(snapshot.fields, keywords, fieldSearchText).length > 0,
-        candidates: topCandidates(snapshot.fields, keywords, fieldSearchText)
-      }
-    ])
+    Object.entries(FIELD_KEYWORDS).map(([kind, keywords]) => {
+      const candidates = topCandidates(snapshot.fields, keywords, fieldSearchText)
+      const descriptionRecognizedAsPreview = kind === "description"
+        && candidates.length === 0
+        && Number((snapshot.targetSurface?.data?.fieldReadiness as Record<string, unknown> | undefined)?.description ?? 0) > 0
+
+      return [
+        kind,
+        {
+          ok: candidates.length > 0 || descriptionRecognizedAsPreview,
+          candidates
+        }
+      ]
+    })
   )
 
   const buttons = Object.fromEntries(

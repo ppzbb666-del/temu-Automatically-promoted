@@ -14,6 +14,7 @@ export type RunnerOptions = {
   repairPlanFile?: string
   profileDir: string
   headed: boolean
+  keepOpen: boolean
   slowMo: number
   saveDraft: boolean
   submit: boolean
@@ -24,6 +25,7 @@ export type RunnerOptions = {
   selectorConfig?: string
   mediaAutomationMode: MediaAutomationMode
   mediaAutomationTools: string[]
+  skipDraftFill: boolean
   sampleMediaActions: boolean
   submitMaxAttempts: number
 }
@@ -32,7 +34,8 @@ export const DEFAULT_DIANXIAOMI_URL = "https://www.dianxiaomi.com/"
 export const DEFAULT_TEMU_URL = "https://seller.temu.com/"
 export const DEFAULT_TASK_API_URL = "http://localhost:8787/tasks/active?requireApproved=true"
 export const DEFAULT_SCREENSHOT_DIR = "output/playwright"
-export const EDITABLE_SELECTOR = "input:not([type='hidden']):not([disabled]), textarea:not([disabled]), [contenteditable='true']"
+export const DEFAULT_UNATTENDED_MEDIA_AUTOMATION_TOOLS = ["image-translation", "batch-resize"]
+export const EDITABLE_SELECTOR = "input:not([type='hidden']):not([type='checkbox']):not([type='radio']):not([type='button']):not([type='submit']):not([type='file']):not([disabled]), textarea:not([disabled]), [contenteditable='true']"
 
 export const ensureDirectory = (directory: string) => {
   mkdirSync(directory, {
@@ -69,6 +72,14 @@ const parseStringList = (value: string | undefined) =>
     .map((item) => item.trim())
     .filter(Boolean)
 
+const resolveMediaAutomationTools = (mode: MediaAutomationMode, tools: string[]) => {
+  if (tools.length > 0) {
+    return tools
+  }
+
+  return mode === "unattended-apply" ? [...DEFAULT_UNATTENDED_MEDIA_AUTOMATION_TOOLS] : []
+}
+
 const parsePositiveInteger = (value: string | undefined, fallback: number) => {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) {
@@ -96,6 +107,11 @@ export const getOptions = (): RunnerOptions => {
   const platform = parsePlatform(getArgValue("platform") ?? process.env.PLATFORM)
   const defaultUrl = platform === "dianxiaomi" ? DEFAULT_DIANXIAOMI_URL : DEFAULT_TEMU_URL
   const defaultProfileDir = `.runtime/playwright/${platform}-profile`
+  const mediaAutomationMode = parseMediaAutomationMode(getArgValue("media-automation-mode") ?? process.env.MEDIA_AUTOMATION_MODE)
+  const mediaAutomationTools = resolveMediaAutomationTools(
+    mediaAutomationMode,
+    parseStringList(getArgValue("media-automation-tools") ?? process.env.MEDIA_AUTOMATION_TOOLS)
+  )
 
   return {
     platform,
@@ -105,6 +121,7 @@ export const getOptions = (): RunnerOptions => {
     repairPlanFile: getArgValue("repair-plan-file") ?? process.env.DIANXIAOMI_REPAIR_PLAN_FILE,
     profileDir: getArgValue("profile") ?? process.env.TEMU_PROFILE_DIR ?? defaultProfileDir,
     headed: parseBoolean(getArgValue("headed") ?? process.env.HEADED, true),
+    keepOpen: parseBoolean(getArgValue("keep-open") ?? process.env.KEEP_OPEN, false),
     slowMo: Number(getArgValue("slow-mo") ?? process.env.SLOW_MO ?? 80),
     saveDraft: parseBoolean(getArgValue("save-draft") ?? process.env.SAVE_DRAFT, true),
     submit: parseBoolean(getArgValue("submit") ?? process.env.SUBMIT, false),
@@ -113,8 +130,9 @@ export const getOptions = (): RunnerOptions => {
     repairMode: parseRepairMode(getArgValue("repair-mode") ?? process.env.DIANXIAOMI_REPAIR_MODE),
     screenshotDir: getArgValue("screenshots") ?? process.env.SCREENSHOT_DIR ?? DEFAULT_SCREENSHOT_DIR,
     selectorConfig: getArgValue("selector-config") ?? process.env.SELECTOR_CONFIG ?? ".runtime/dianxiaomi-selector-config.json",
-    mediaAutomationMode: parseMediaAutomationMode(getArgValue("media-automation-mode") ?? process.env.MEDIA_AUTOMATION_MODE),
-    mediaAutomationTools: parseStringList(getArgValue("media-automation-tools") ?? process.env.MEDIA_AUTOMATION_TOOLS),
+    mediaAutomationMode,
+    mediaAutomationTools,
+    skipDraftFill: parseBoolean(getArgValue("skip-draft-fill") ?? process.env.SKIP_DRAFT_FILL, false),
     sampleMediaActions: parseBoolean(getArgValue("sample-media-actions") ?? process.env.SAMPLE_MEDIA_ACTIONS, false),
     submitMaxAttempts: parsePositiveInteger(getArgValue("submit-max-attempts") ?? process.env.SUBMIT_MAX_ATTEMPTS, 3)
   }
@@ -161,24 +179,151 @@ export const loadTask = async (options: RunnerOptions) => {
   return fetchActiveTask(options.taskApiUrl)
 }
 
-export const waitForManualLoginIfNeeded = async (page: Page) => {
-  const loginHints = ["登录", "login", "sign in", "验证码", "captcha"]
-  const bodyText = normalizeText(await page.locator("body").innerText().catch(() => ""))
-  const seemsLoginPage = loginHints.some((hint) => bodyText.includes(hint.toLowerCase()))
+type ManualLoginSurfaceInspection = {
+  shouldWaitForManualLogin: boolean
+  reason: string
+  currentUrl: string
+}
 
-  if (!seemsLoginPage) {
+const LOGIN_TEXT_HINTS = ["登录", "请登录", "login", "sign in", "验证码", "captcha"]
+const LOGIN_ACTION_HINTS = ["登录", "立即登录", "去登录", "login", "log in", "sign in"]
+const EDIT_SURFACE_HINTS = ["商品", "标题", "价格", "库存", "刊登", "sku", "price", "stock", "title", "publish"]
+const inspectManualLoginSurfaceEval = new Function("input", `
+  const normalize = (value) => (value ?? "").replace(/\\s+/g, " ").trim().toLowerCase()
+  const isVisible = (element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false
+    }
+
+    const style = window.getComputedStyle(element)
+    const rect = element.getBoundingClientRect()
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+  }
+
+  const titleText = normalize(document.title)
+  const bodyText = normalize(document.body?.innerText)
+  const combinedText = \`\${titleText} \${bodyText}\`.trim()
+  const passwordInputVisible = Array.from(document.querySelectorAll("input[type='password']")).some((element) => isVisible(element))
+  const captchaVisible = Array.from(
+    document.querySelectorAll(
+      "input[name*='captcha' i], input[id*='captcha' i], img[src*='captcha' i], iframe[src*='captcha' i], [class*='captcha' i], [id*='captcha' i]"
+    )
+  ).some((element) => isVisible(element))
+  const loginKeywordDetected = input.loginTextHints.some((hint) => combinedText.includes(hint))
+  const loginActionVisible = Array.from(
+    document.querySelectorAll("button, a, [role='button'], input[type='submit'], input[type='button']")
+  ).some((element) => {
+    if (!isVisible(element)) {
+      return false
+    }
+
+    const rawText = element instanceof HTMLInputElement ? element.value : element.textContent
+    const text = normalize(rawText)
+    return input.loginActionHints.some((hint) => text.includes(hint))
+  })
+  const pathname = window.location.pathname.toLowerCase()
+  const search = window.location.search.toLowerCase()
+  const host = window.location.hostname.toLowerCase()
+  const likelyAuthUrl = /(?:^|\\/)(login|signin|sign-in|auth)(?:\\/|$)/i.test(pathname)
+    || /(?:^|[?&])(login|signin)=/i.test(search)
+  const likelyEditUrl = /\\/web\\/poptemu\\/edit\\b/i.test(pathname)
+    || /\\/(product|listing|goods|item)\\/edit\\b/i.test(pathname)
+  const visibleEditableCount = Array.from(document.querySelectorAll(input.editableSelector)).filter((element) => isVisible(element)).length
+  const editSurfaceSignal = input.editSurfaceHints.some((hint) => combinedText.includes(hint))
+  const helpHost = host.startsWith("help.")
+  const shouldWaitForManualLogin = Boolean(
+    passwordInputVisible
+    || captchaVisible
+    || likelyAuthUrl
+    || ((loginKeywordDetected || loginActionVisible) && !likelyEditUrl && !editSurfaceSignal && visibleEditableCount < 3 && !helpHost)
+  )
+  const reasonParts = []
+  if (passwordInputVisible) {
+    reasonParts.push("password input visible")
+  }
+  if (captchaVisible) {
+    reasonParts.push("captcha control visible")
+  }
+  if (likelyAuthUrl) {
+    reasonParts.push(\`auth url: \${pathname}\${search}\`)
+  }
+  if (loginKeywordDetected) {
+    reasonParts.push("login keywords detected")
+  }
+  if (loginActionVisible) {
+    reasonParts.push("login action visible")
+  }
+  if (likelyEditUrl) {
+    reasonParts.push("edit url detected")
+  }
+  if (editSurfaceSignal) {
+    reasonParts.push("listing edit text detected")
+  }
+  if (visibleEditableCount >= 3) {
+    reasonParts.push(\`editable fields visible: \${visibleEditableCount}\`)
+  }
+  if (helpHost) {
+    reasonParts.push("help host")
+  }
+
+  return {
+    shouldWaitForManualLogin,
+    reason: reasonParts.join("; ") || "no login surface signals",
+    currentUrl: window.location.href
+  }
+`)
+
+export const inspectManualLoginSurface = async (page: Page): Promise<ManualLoginSurfaceInspection> =>
+  page.evaluate(
+    inspectManualLoginSurfaceEval as never,
+    {
+      loginTextHints: LOGIN_TEXT_HINTS.map((hint) => hint.toLowerCase()),
+      loginActionHints: LOGIN_ACTION_HINTS.map((hint) => hint.toLowerCase()),
+      editSurfaceHints: EDIT_SURFACE_HINTS.map((hint) => hint.toLowerCase()),
+      editableSelector: EDITABLE_SELECTOR
+    }
+  )
+
+export const waitForManualLoginIfNeeded = async (page: Page) => {
+  let inspection = await inspectManualLoginSurface(page).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/Target page, context or browser has been closed/i.test(message)) {
+      return null
+    }
+    throw error
+  })
+
+  if (!inspection?.shouldWaitForManualLogin) {
     return
   }
 
-  console.log("检测到可能需要登录。请在打开的浏览器中手动完成登录，脚本会等待页面离开登录状态。")
-  await page.waitForFunction(
-    (hints) => {
-      const text = document.body?.innerText?.toLowerCase() ?? ""
-      return !hints.some((hint) => text.includes(hint))
-    },
-    loginHints.map((hint) => hint.toLowerCase()),
-    {
-      timeout: 5 * 60 * 1000
+  console.log(`检测到可能需要登录。请在打开的浏览器中手动完成登录，脚本会等待页面离开登录状态。当前页面：${inspection.currentUrl}`)
+  const deadline = Date.now() + 5 * 60 * 1000
+
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+    if (page.isClosed()) {
+      console.warn("Login page was replaced during authentication; recovering on the current browser page.")
+      return
     }
-  )
+
+    inspection = await inspectManualLoginSurface(page).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/Target page, context or browser has been closed/i.test(message)) {
+        return null
+      }
+      throw error
+    })
+
+    if (!inspection) {
+      console.warn("Login page was replaced during authentication; recovering on the current browser page.")
+      return
+    }
+
+    if (!inspection.shouldWaitForManualLogin) {
+      return
+    }
+  }
+
+  throw new Error(`Timed out waiting for manual login to finish: ${inspection.reason}`)
 }

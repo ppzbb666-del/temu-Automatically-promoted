@@ -13,8 +13,11 @@ import {
   type AutomationStepResult,
   applyRepairPlan,
   fillDraft,
+  normalizeDescriptionImageModules,
+  fillSkuImageLinks,
   inspectRepairPlanPreview,
   inspectPublishSurface,
+  planMediaProcessing,
   saveOrSubmit,
   waitForPublishPage
 } from "./adapters/dianxiaomi-adapter"
@@ -28,7 +31,7 @@ const captureArtifacts = async (page: Page, screenshotDir: string, name: string)
     path: screenshotPath,
     fullPage: true
   })
-  console.log(`已保存截图：${screenshotPath}`)
+  console.log(`Saved screenshot: ${screenshotPath}`)
   return screenshotPath
 }
 
@@ -45,8 +48,14 @@ type ExecutionReport = {
   steps: AutomationStepResult[]
 }
 
+const NON_BLOCKING_FAILURE_STEPS = new Set([
+  "media-processing-plan"
+])
+
 const getReportStatus = (steps: AutomationStepResult[]): ExecutionReport["status"] => {
-  const failedCount = steps.filter((step) => step.status === "failed").length
+  const failedCount = steps.filter((step) =>
+    step.status === "failed" && !NON_BLOCKING_FAILURE_STEPS.has(step.id)
+  ).length
   const doneCount = steps.filter((step) => step.status === "done").length
 
   if (failedCount === 0 && doneCount > 0) {
@@ -64,7 +73,7 @@ const saveExecutionReport = (options: RunnerOptions, report: ExecutionReport) =>
   ensureDirectory(options.screenshotDir)
   const reportPath = path.join(options.screenshotDir, `${report.id}.json`)
   writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8")
-  console.log(`已保存执行报告：${reportPath}`)
+  console.log(`Saved execution report: ${reportPath}`)
   return reportPath
 }
 
@@ -82,25 +91,163 @@ const loadRepairPreviewFile = (repairPlanFile: string): DianxiaomiRepairPreviewF
   return parsed
 }
 
+const parsePageUrl = (value: string) => {
+  try {
+    return new URL(value)
+  } catch {
+    return null
+  }
+}
+
+const isDianxiaomiHost = (host: string) => /(^|\.)dianxiaomi\.(com|cn)$/i.test(host)
+
+const isDianxiaomiHelpPage = (page: Page) => {
+  const parts = parsePageUrl(page.url())
+  return Boolean(parts) && /^help\./i.test(parts!.hostname) && isDianxiaomiHost(parts!.hostname)
+}
+
+const isRealDianxiaomiEditTargetUrl = (value: string) => {
+  const parts = parsePageUrl(value)
+  if (!parts || !isDianxiaomiHost(parts.hostname)) {
+    return false
+  }
+
+  if (/^help\./i.test(parts.hostname)) {
+    return false
+  }
+
+  const pathname = parts.pathname.toLowerCase()
+  return pathname === "/web/poptemu/edit" || /\/(product|listing|goods|item)\/edit\b/i.test(parts.pathname)
+}
+
+const isNonHelpDianxiaomiUrl = (value: string) => {
+  const parts = parsePageUrl(value)
+  return Boolean(parts) && isDianxiaomiHost(parts!.hostname) && !/^help\./i.test(parts!.hostname)
+}
+
+const getDianxiaomiEditPageKey = (value: string) => {
+  const parts = parsePageUrl(value)
+  if (!parts || !isDianxiaomiHost(parts.hostname) || parts.pathname !== "/web/popTemu/edit") {
+    return null
+  }
+
+  const itemId = parts.searchParams.get("id")?.trim()
+  return itemId
+    ? `${parts.hostname.toLowerCase()}${parts.pathname}?id=${itemId}`
+    : `${parts.hostname.toLowerCase()}${parts.pathname}`
+}
+
+const isSameDianxiaomiEditPage = (left: string, right: string) => {
+  const leftKey = getDianxiaomiEditPageKey(left)
+  const rightKey = getDianxiaomiEditPageKey(right)
+
+  if (leftKey && rightKey) {
+    return leftKey === rightKey
+  }
+
+  return left === right
+}
+
+const rankAutomationPage = (page: Page, targetUrl: string) => {
+  const url = page.url()
+
+  if (!url || url === "about:blank") {
+    return 5
+  }
+
+  if (isSameDianxiaomiEditPage(url, targetUrl)) {
+    return 100
+  }
+
+  if (getDianxiaomiEditPageKey(url)) {
+    return 80
+  }
+
+  if (isDianxiaomiHelpPage(page)) {
+    return -10
+  }
+
+  const parts = parsePageUrl(url)
+  if (parts && isDianxiaomiHost(parts.hostname)) {
+    return 30
+  }
+
+  return 0
+}
+
+const closeIrrelevantHelpPages = async (context: BrowserContext, activePage: Page) => {
+  for (const page of context.pages()) {
+    if (page === activePage || page.isClosed() || !isDianxiaomiHelpPage(page)) {
+      continue
+    }
+
+    await page.close().catch(() => {})
+  }
+}
+
+const acquireAutomationPage = async (context: BrowserContext, targetUrl: string) => {
+  const selected = context.pages()
+    .filter((page) => !page.isClosed())
+    .map((page) => ({
+      page,
+      score: rankAutomationPage(page, targetUrl)
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score)[0]?.page
+
+  const page = selected ?? await context.newPage()
+  page.setDefaultTimeout(15_000)
+
+  await closeIrrelevantHelpPages(context, page)
+
+  const currentUrl = page.url()
+  const canNavigateToTarget = isRealDianxiaomiEditTargetUrl(targetUrl)
+  if (canNavigateToTarget && (!currentUrl || currentUrl === "about:blank" || !isSameDianxiaomiEditPage(currentUrl, targetUrl))) {
+    console.log(`Opening target page: ${targetUrl}`)
+    await page.goto(targetUrl, {
+      waitUntil: "domcontentloaded"
+    })
+  } else if (!currentUrl || currentUrl === "about:blank") {
+    console.log(`Opening local or fixture target page: ${targetUrl}`)
+    await page.goto(targetUrl, {
+      waitUntil: "domcontentloaded"
+    }).catch(() => {})
+  } else if (!canNavigateToTarget) {
+    console.log(`Target URL is not a real Dianxiaomi edit page, reusing current browser page: ${targetUrl}`)
+  } else {
+    console.log(`Reusing existing product page: ${currentUrl}`)
+  }
+
+  await page.bringToFront().catch(() => {})
+  return page
+}
+
+const safeCaptureArtifacts = async (page: Page, screenshotDir: string, name: string) => {
+  try {
+    return await captureArtifacts(page, screenshotDir, name)
+  } catch (error) {
+    console.warn(`Could not capture screenshot "${name}": ${error instanceof Error ? error.message : String(error)}`)
+    return ""
+  }
+}
+
 const runDianxiaomiFlow = async (context: BrowserContext, options: RunnerOptions) => {
   const task = await loadTask(options)
   const repairPreview = options.repairPlanFile ? loadRepairPreviewFile(options.repairPlanFile) : null
   const selectorConfig = loadSelectorConfig(options.selectorConfig)
-  console.log(`加载任务：${task.id} - ${task.product.title}`)
+  console.log(`Loaded task: ${task.id} - ${task.product.title}`)
 
-  const page = await context.newPage()
-  page.setDefaultTimeout(15_000)
-
-  console.log(`打开页面：${options.targetUrl}`)
-  await page.goto(options.targetUrl, {
-    waitUntil: "domcontentloaded"
-  })
+  let page = await acquireAutomationPage(context, options.targetUrl)
   const steps: AutomationStepResult[] = []
 
   try {
     await waitForManualLoginIfNeeded(page)
+    // The Dianxiaomi login flow can replace the original page or bounce to a
+    // help/workspace tab. Re-acquire the best live page before proceeding.
+    page = await acquireAutomationPage(context, options.targetUrl)
     await waitForPublishPage(page, selectorConfig, {
-      waitForManualNavigation: !options.dryRun
+      waitForManualNavigation: !options.dryRun,
+      targetUrl: options.targetUrl
     })
 
     if (repairPreview) {
@@ -112,18 +259,59 @@ const runDianxiaomiFlow = async (context: BrowserContext, options: RunnerOptions
     } else if (options.dryRun) {
       steps.push(...await inspectPublishSurface(page, task.draft, selectorConfig, options))
     } else {
-      steps.push(...await fillDraft(page, task.draft, selectorConfig, options))
-      const writeBlocked = steps.some((step) => step.id.startsWith("write-blocked-") && step.status === "failed")
+      if (!options.skipDraftFill) {
+        steps.push(...await fillDraft(page, task.draft, task.product.images, selectorConfig, options))
+      }
+      const writeBlocked = steps.some((step) =>
+        step.id.startsWith("write-blocked-")
+        && step.status === "failed"
+      )
       if (!writeBlocked) {
+        if (options.submit && options.skipDraftFill) {
+          steps.push(await fillSkuImageLinks(page, task.product.images))
+          steps.push(await normalizeDescriptionImageModules(page, task.product.images))
+        }
+        if (
+          options.submit
+          && options.skipDraftFill
+          && (options.mediaAutomationMode === "unattended-open" || options.mediaAutomationMode === "unattended-apply")
+        ) {
+          const mediaProcessingPlan = await planMediaProcessing(page, selectorConfig, options)
+          steps.push(mediaProcessingPlan)
+          console.log(`save-or-submit stage: media processing plan completed (${mediaProcessingPlan.status})`)
+          if (options.mediaAutomationMode === "unattended-apply" && mediaProcessingPlan.status === "failed") {
+            steps.push({
+              id: "write-blocked-media-processing",
+              label: "Write blocked",
+              status: "failed",
+              detail: "Submit was blocked because Dianxiaomi media processing did not complete in unattended mode",
+              data: mediaProcessingPlan.data
+            })
+          }
+        }
+      }
+      const mediaWriteBlocked = steps.some((step) =>
+        step.id === "write-blocked-media-processing"
+        && step.status === "failed"
+      )
+      if (!writeBlocked && !mediaWriteBlocked) {
         steps.push(await saveOrSubmit(page, options))
       }
     }
 
-    const runKind = repairPreview ? options.repairMode === "apply" ? "repair-apply" : "repair-preview" : options.dryRun ? "dry-run" : "run"
-    const screenshotPath = await captureArtifacts(
+    const runKind = repairPreview
+      ? options.repairMode === "apply" ? "repair-apply" : "repair-preview"
+      : options.dryRun ? "dry-run" : "run"
+    const screenshotPath = await safeCaptureArtifacts(
       page,
       options.screenshotDir,
-      runKind === "repair-apply" ? "dianxiaomi-repair-apply" : runKind === "repair-preview" ? "dianxiaomi-repair-preview" : runKind === "dry-run" ? "dianxiaomi-dry-run" : "dianxiaomi-filled"
+      runKind === "repair-apply"
+        ? "dianxiaomi-repair-apply"
+        : runKind === "repair-preview"
+          ? "dianxiaomi-repair-preview"
+          : runKind === "dry-run"
+            ? "dianxiaomi-dry-run"
+            : "dianxiaomi-filled"
     )
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
 
@@ -133,20 +321,20 @@ const runDianxiaomiFlow = async (context: BrowserContext, options: RunnerOptions
       taskTitle: task.product.title,
       platform: options.platform,
       pageUrl: page.url(),
-      pageTitle: await page.title(),
+      pageTitle: await page.title().catch(() => ""),
       status: getReportStatus(steps),
       createdAt: new Date().toISOString(),
       screenshotPath,
       steps
     })
   } catch (error) {
-    const screenshotPath = await captureArtifacts(page, options.screenshotDir, "dianxiaomi-error")
+    const screenshotPath = await safeCaptureArtifacts(page, options.screenshotDir, "dianxiaomi-error")
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
     const message = error instanceof Error ? error.message : String(error)
 
     steps.push({
       id: "runtime-error",
-      label: "运行异常",
+      label: "Runtime error",
       status: "failed",
       detail: message
     })
@@ -174,7 +362,7 @@ const main = async () => {
   ensureDirectory(options.screenshotDir)
 
   if (options.platform !== "dianxiaomi") {
-    throw new Error("当前 runner 仅适配店小秘。请使用默认 platform=dianxiaomi，Temu 适配后续单独补齐。")
+    throw new Error("This runner currently supports only Dianxiaomi.")
   }
 
   const context = await chromium.launchPersistentContext(options.profileDir, {
@@ -189,10 +377,10 @@ const main = async () => {
   try {
     await runDianxiaomiFlow(context, options)
   } finally {
-    if (!options.headed) {
+    if (!options.headed || !options.keepOpen) {
       await context.close()
     } else {
-      console.log("headed 模式下浏览器保持打开，确认完成后可手动关闭。")
+      console.log("Headed mode keeps the browser open for inspection.")
     }
   }
 }

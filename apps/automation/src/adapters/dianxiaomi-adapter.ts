@@ -1,7 +1,15 @@
+import { extractDianxiaomiImageCheckIssues, parseDianxiaomiImageCheckSummary } from "@temu-ai-ops/shared"
 import type { Locator, Page } from "playwright"
 import path from "node:path"
 import type { DianxiaomiProductRepairAction, DianxiaomiProductRepairPlan, ListingDraft, ListingSkuPricing } from "@temu-ai-ops/shared"
-import { EDITABLE_SELECTOR, escapeRegExp, firstVisible, normalizeText, type RunnerOptions } from "../common"
+import {
+  EDITABLE_SELECTOR,
+  escapeRegExp,
+  firstVisible,
+  inspectManualLoginSurface,
+  normalizeText,
+  type RunnerOptions
+} from "../common"
 import { findByConfiguredSelectors, loadSelectorConfig, type DianxiaomiSelectorConfig } from "../selector-config"
 
 export type FieldKind = "title" | "description" | "price" | "stock" | "attribute"
@@ -14,6 +22,60 @@ export type AutomationStepResult = {
   status: StepStatus
   detail: string
   data?: Record<string, unknown>
+}
+
+type ProbedProductImage = {
+  url: string
+  width: number
+  height: number
+  loaded: boolean
+  aspectRatio: number | null
+}
+
+type SkuImageCellState = {
+  imageCount: number
+  imageUrls: string[]
+  imageMeta: Array<{
+    src: string
+    width: number
+    height: number
+    aspectRatio: number | null
+  }>
+}
+
+type SkuImageCellTarget = {
+  cell: Locator
+  rowIndex: number
+  rowText: string
+}
+
+type FillSkuImageLinksOptions = {
+  maxRows?: number
+  screenshotDir?: string
+  screenshotPrefix?: string
+  mode?: "strict-color" | "square-preview-all-colors"
+}
+
+type DescriptionImageModuleState = {
+  moduleCount: number
+  modules: Array<{
+    index: number
+    src: string
+    width: number
+    height: number
+    aspectRatio: number | null
+  }>
+}
+
+type DescriptionImageModuleTarget = {
+  item: Locator
+  index: number
+  image: {
+    src: string
+    width: number
+    height: number
+    aspectRatio: number | null
+  } | null
 }
 
 type MediaToolDefinition = {
@@ -59,12 +121,14 @@ type MediaSurfaceState = "matched" | "missing" | "mismatched"
 type MediaFailureKind =
   | "transient"
   | "invalid-media"
+  | "storage-quota"
   | "missing-input"
   | "unsupported"
   | "surface-mismatch"
   | "surface-missing"
   | "apply-control-missing"
   | "return-blocked"
+  | "image-unchanged"
   | "unknown"
 
 type MediaToolSafetyItem = {
@@ -88,6 +152,12 @@ type MediaToolSafetyItem = {
   screenshotPath?: string | null
   beforeApplyScreenshotPath?: string | null
   afterApplyScreenshotPath?: string | null
+  // P0-F: listing image signature probes captured before/after apply. Used
+  // as hard evidence for instant-action tools and as soft evidence for
+  // dialog-based tools.
+  imageSignatureBefore?: string
+  imageSignatureAfter?: string
+  imageSignatureChanged?: boolean
   surfaceState?: MediaSurfaceState
   surfaceMatchedKeyword?: string | null
   surfaceText?: string
@@ -95,12 +165,18 @@ type MediaToolSafetyItem = {
   feedbackState?: FeedbackState
   feedbackMessage?: string
   feedbackSource?: string
+  imageCheckIssues?: Array<{
+    category: string
+    issue: string
+    detail?: string
+  }>
   feedbackAttempts?: MediaApplyAttemptFeedback[]
   applyAttempts?: number
   maxApplyAttempts?: number
   failureKind?: MediaFailureKind
   retryable?: boolean
   error?: string | null
+  preparation?: Record<string, unknown>
   locator: LocatorDescriptor | null
 }
 
@@ -114,6 +190,32 @@ type SubmitFeedback = {
   state: FeedbackState
   message: string
   source: string
+}
+
+type PageValidationIssue = {
+  label: string
+  text: string
+  explain: string[]
+  inputs: Array<{
+    name: string
+    placeholder: string
+    value: string
+    className: string
+  }>
+  selects: string[]
+  rect: {
+    left: number
+    top: number
+    width: number
+    height: number
+  }
+}
+
+type PageValidationSummary = {
+  issueCount: number
+  issues: PageValidationIssue[]
+  warningTexts: string[]
+  toastTexts: string[]
 }
 
 type MediaApplyFeedback = {
@@ -134,11 +236,65 @@ type MediaSurfaceInspection = {
   text: string
 }
 
+type ImageCheckIssue = {
+  category: string
+  issue: string
+  detail?: string
+}
+
+type ImageCheckCategorySummary = {
+  label: string
+  count: number
+}
+
+type ImageCheckSelectionCandidate = {
+  label: string
+  dimensions: string | null
+  imageType: string | null
+  src?: string | null
+}
+
+type ImageCheckCategoryApplyResult = {
+  category: string
+  count: number
+  selectedCount: number
+  changed: boolean
+  candidates: ImageCheckSelectionCandidate[]
+  batchTool?: MediaToolDefinition["id"] | null
+  batchToolApplied?: boolean
+  batchToolReason?: string | null
+}
+
+type ImageCheckApplySummary = {
+  applied: boolean
+  changed: boolean
+  status: "applied" | "no-op" | "failed"
+  reason: string
+  categories: ImageCheckCategoryApplyResult[]
+  issues: ImageCheckIssue[]
+  directReplacement?: {
+    applied: boolean
+    reason: string
+    imageUrls: string[]
+    writerResult?: AutomationStepResult | null
+  } | null
+  deferredVerification?: {
+    required: boolean
+    categoryLabels: string[]
+    verified?: boolean
+    remainingCategories?: Array<{ label: string; count: number }>
+    surfacedIssues?: ImageCheckIssue[]
+    reason?: string
+  } | null
+}
+
 type SubmitAttemptResult = SubmitFeedback & {
   attempt: number
   clickedSubmit: boolean
+  clickedSubmitMenuAction: boolean
   clickedConfirm: boolean
   feedbackChanged: boolean
+  submitMenuActionText?: string | null
 }
 
 type MediaProcessingSafetyPlan = {
@@ -175,6 +331,67 @@ type TargetSurfaceInspection = {
     mediaTools: number
     editableFields: number
   }
+}
+
+const isRealDianxiaomiEditTargetUrl = (value: string | null | undefined) => {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  try {
+    const parsed = new URL(trimmed)
+    const host = parsed.hostname.toLowerCase()
+    if (!/(^|\.)dianxiaomi\.(com|cn)$/i.test(host) || /^help\./i.test(host)) {
+      return false
+    }
+
+    const pathname = parsed.pathname.toLowerCase()
+    return pathname === "/web/poptemu/edit" || /\/(product|listing|goods|item)\/edit\b/i.test(parsed.pathname)
+  } catch {
+    return false
+  }
+}
+
+const parseTargetPageUrl = (value: string | null | undefined) => {
+  const trimmed = value?.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  try {
+    return new URL(trimmed)
+  } catch {
+    return null
+  }
+}
+
+const getDianxiaomiEditPageKey = (value: string | null | undefined) => {
+  const parts = parseTargetPageUrl(value)
+  if (!parts || !/(^|\.)dianxiaomi\.(com|cn)$/i.test(parts.hostname) || /^help\./i.test(parts.hostname)) {
+    return null
+  }
+
+  const pathname = parts.pathname.toLowerCase()
+  if (pathname !== "/web/poptemu/edit") {
+    return null
+  }
+
+  const itemId = parts.searchParams.get("id")?.trim()
+  return itemId
+    ? `${parts.hostname.toLowerCase()}${pathname}?id=${itemId}`
+    : `${parts.hostname.toLowerCase()}${pathname}`
+}
+
+const isSameDianxiaomiEditPage = (left: string | null | undefined, right: string | null | undefined) => {
+  const leftKey = getDianxiaomiEditPageKey(left)
+  const rightKey = getDianxiaomiEditPageKey(right)
+
+  if (leftKey && rightKey) {
+    return leftKey === rightKey
+  }
+
+  return (left ?? "").trim() === (right ?? "").trim()
 }
 
 const stepResult = (
@@ -215,8 +432,53 @@ const ATTRIBUTE_ALIASES: Record<string, string[]> = {
   usage: ["用途", "使用场景", "usage"]
 }
 
+const SKU_IMAGE_TARGET_RATIO = 3 / 4
+const SKU_IMAGE_STRICT_RATIO_MIN = 0.735
+const SKU_IMAGE_STRICT_RATIO_MAX = 0.755
+const SKU_IMAGE_RATIO_MIN = 0.68
+const SKU_IMAGE_RATIO_MAX = 0.8
+const SKU_IMAGE_MIN_WIDTH_PX = 1340
+const SKU_IMAGE_MIN_HEIGHT_PX = 1785
+const SKU_IMAGE_MIN_COUNT = 3
+const SKU_IMAGE_FALLBACK_RATIO_MIN = 0.65
+const SKU_IMAGE_FALLBACK_RATIO_MAX = 0.85
+const SKU_IMAGE_FALLBACK_MIN_WIDTH_PX = 1200
+const SKU_IMAGE_FALLBACK_MIN_HEIGHT_PX = 1600
+const SECTION_SQUARE_RATIO_MIN = 0.95
+const SECTION_SQUARE_RATIO_MAX = 1.05
+const SKU_IMAGE_DIALOG_KEYWORDS = [
+  "从网络地址(url)选择图片",
+  "图片url地址",
+  "网络地址(url)",
+  "网络地址",
+  "url地址"
+]
+const SKU_IMAGE_DIALOG_FAILURE_KEYWORDS = [
+  "错误",
+  "失败",
+  "无效",
+  "不能为空",
+  "请填写",
+  "请检查",
+  "格式不正确",
+  "图片地址"
+]
+const SKU_IMAGE_CHOOSE_BUTTON_TEXT = "\u9009\u62e9\u56fe\u7247"
+const SKU_IMAGE_NETWORK_MENU_TEXT = "\u7f51\u7edc\u56fe\u7247"
+const SKU_IMAGE_NETWORK_ADDRESS_TEXT = "\u7f51\u7edc\u5730\u5740"
+const SKU_IMAGE_ADD_BUTTON_TEXT = "\u6dfb\u52a0"
+const SKU_IMAGE_CONFIRM_TEXT = "\u786e\u5b9a"
+const SKU_IMAGE_CONFIRM_ALT_TEXT = "\u786e\u8ba4"
+const SKU_IMAGE_DELETE_TEXT = "\u5220\u9664"
+const DESCRIPTION_IMAGE_RATIO_MIN = SKU_IMAGE_STRICT_RATIO_MIN
+const DESCRIPTION_IMAGE_RATIO_MAX = SKU_IMAGE_STRICT_RATIO_MAX
+const DESCRIPTION_EDIT_TRIGGER_KEYWORDS = ["\u7f16\u8f91\u63cf\u8ff0", "\u63cf\u8ff0\u7f16\u8f91", "edit description"]
+const DESCRIPTION_MODAL_KEYWORDS = ["Temu\u4ea7\u54c1\u63cf\u8ff0", "\u4ea7\u54c1\u63cf\u8ff0", "Temu product description"]
+const DESCRIPTION_MODAL_SAVE_KEYWORDS = ["\u4fdd\u5b58", "\u786e\u5b9a", "save", "confirm"]
+const DESCRIPTION_DELETE_KEYWORDS = ["\u5220\u9664", "delete", "remove"]
+
 export const getFieldKeywords = (kind: FieldKind) => [
-  ...(kind === "title" ? ["\u5546\u54c1\u6807\u9898", "\u4ea7\u54c1\u6807\u9898", "\u520a\u767b\u6807\u9898", "\u5e73\u53f0\u6807\u9898", "\u6807\u9898"] : []),
+  ...(kind === "title" ? ["\u5546\u54c1\u6807\u9898", "\u4ea7\u54c1\u6807\u9898", "\u82f1\u6587\u6807\u9898", "\u520a\u767b\u6807\u9898", "\u5e73\u53f0\u6807\u9898", "\u6807\u9898"] : []),
   ...(kind === "description" ? ["\u5546\u54c1\u63cf\u8ff0", "\u4ea7\u54c1\u63cf\u8ff0", "\u520a\u767b\u63cf\u8ff0", "\u8be6\u60c5\u63cf\u8ff0", "\u63cf\u8ff0"] : []),
   ...(kind === "price" ? ["\u7533\u62a5\u4ef7", "\u5efa\u8bae\u552e\u4ef7", "\u520a\u767b\u4ef7", "\u9500\u552e\u4ef7", "\u552e\u4ef7", "\u4ef7\u683c"] : []),
   ...(kind === "stock" ? ["\u5e93\u5b58", "\u520a\u767b\u5e93\u5b58", "\u53ef\u552e\u5e93\u5b58", "\u6570\u91cf"] : []),
@@ -252,19 +514,173 @@ const DIANXIAOMI_MEDIA_TOOLS: MediaToolDefinition[] = [
     id: "image-editor",
     configKey: "imageEditor",
     label: "Xiaomi image editor",
-    keywords: ["小秘美图", "美图", "图片编辑", "image editor", "edit image"]
+    keywords: ["小秘美图", "美图", "图片编辑", "编辑图片", "批量编辑", "image editor", "edit image"]
   },
   {
     id: "batch-resize",
     configKey: "batchResize",
     label: "Batch resize",
-    keywords: ["批量改大小", "改大小", "图片大小", "resize", "batch resize"]
+    keywords: ["批量改图片尺寸", "批量改大小", "改大小", "图片大小", "图片尺寸", "resize", "batch resize"]
   },
   {
     id: "image-management",
     configKey: "imageManagement",
     label: "Image management",
-    keywords: ["图片管理", "图片空间", "image management", "image space"]
+    keywords: ["图片检测", "检测图片", "图片管理", "图片空间", "image management", "image space"]
+  }
+]
+
+const IMAGE_OPTIONS_TRIGGER_KEYWORDS = ["编辑图片", "crop编辑图片", "批量", "图片操作"]
+const IMAGE_OPTIONS_MENU_KEYWORDS: Partial<Record<MediaToolDefinition["id"], string[]>> = {
+  "image-translation": ["图片翻译", "翻译图片"],
+  "image-editor": ["批量编辑", "编辑图片"],
+  "batch-resize": ["批量改图片尺寸", "批量改大小", "改图片尺寸"]
+}
+const BATCH_RESIZE_TARGET_SIDE_PX = 1785
+const BATCH_RESIZE_COMPLETION_TIMEOUT_MS = 90_000
+const BATCH_RESIZE_PROGRESS_KEYWORDS = [
+  "处理中",
+  "上传中",
+  "生成中",
+  "请稍候",
+  "请等待",
+  "progress",
+  "processing",
+  "uploading",
+  "generating"
+]
+
+// P0-D: tools whose entry click triggers an in-page effect rather than a
+// closeable dialog. The apply path for these is `applyInstantMediaAction` —
+// it skips dialog/apply-button detection and only waits for an in-page
+// success keyword + an image signature change.
+const INSTANT_ACTION_TOOL_IDS = new Set<MediaToolDefinition["id"]>([
+  "image-translation",
+  "image-management"
+])
+
+const MEDIA_INSTANT_SUCCESS_KEYWORDS = [
+  "翻译完成",
+  "翻译成功",
+  "已翻译",
+  "检测完成",
+  "检测通过",
+  "图片检测完成",
+  "已处理",
+  "处理完成",
+  "已应用",
+  "应用成功",
+  "完成",
+  "success",
+  "successful",
+  "completed",
+  "done",
+  "applied"
+]
+
+const MEDIA_INSTANT_FAILURE_KEYWORDS = [
+  "翻译失败",
+  "检测失败",
+  "处理失败",
+  "图片不合规",
+  "无法识别",
+  "不支持的图片",
+  "请重试",
+  "失败",
+  "错误",
+  "异常",
+  "failed",
+  "failure",
+  "error",
+  "invalid",
+  "unsupported"
+]
+
+const IMAGE_CHECK_CATEGORY_LABELS = [
+  "轮播图",
+  "产品图",
+  "详情图",
+  "主图",
+  "sku图",
+  "颜色图",
+  "属性图",
+  "carouse",
+  "carousel",
+  "product image",
+  "detail image",
+  "main image",
+  "sku image",
+  "color image"
+]
+
+const IMAGE_CHECK_ISSUE_LABELS = [
+  "尺寸",
+  "比例",
+  "宽高",
+  "非英文",
+  "中文",
+  "水印",
+  "模糊",
+  "像素",
+  "大小",
+  "格式",
+  "size",
+  "ratio",
+  "aspect",
+  "watermark",
+  "english",
+  "language",
+  "resolution",
+  "format"
+]
+
+const IMAGE_CHECK_SAVE_KEYWORDS = [
+  "保存",
+  "应用",
+  "确认",
+  "save",
+  "apply",
+  "confirm"
+]
+
+const IMAGE_CHECK_CLOSE_KEYWORDS = [
+  "关闭",
+  "取消",
+  "返回",
+  "close",
+  "cancel",
+  "return"
+]
+
+const IMAGE_CHECK_MAX_VISIBLE_CANDIDATES = 80
+
+const IMAGE_CHECK_CATEGORY_PRIORITY = [
+  "图片包含文字、水印",
+  "产品图尺寸不合规",
+  "描述图尺寸不合规",
+  "图片过大",
+  "图片链接失效"
+] as const
+
+const IMAGE_CHECK_CATEGORY_RULES: Array<{
+  issuePattern: RegExp
+  categoryPattern: RegExp
+}> = [
+  {
+    issuePattern: /(非英文|非英语|中文|文字|水印|language|english|watermark)/i,
+    categoryPattern: /图片包含文字|水印/i
+  },
+  {
+    issuePattern: /(尺寸|比例|宽高|像素|size|ratio|aspect|resolution)/i,
+    categoryPattern: /(产品图|素材图).*(尺寸|不合规)|尺寸不合规/i
+  },
+  {
+    issuePattern: /(过大|大小|too large|oversize)/i,
+    categoryPattern: /图片过大/i
+  },
+  {
+    issuePattern: /(失效|链接|link|invalid)/i,
+    categoryPattern: /图片链接失效/i
   }
 ]
 
@@ -280,6 +696,10 @@ const BLOCKING_DIALOG_SELECTOR = [
 
 const MEDIA_APPLY_KEYWORDS: Record<MediaToolDefinition["id"], string[]> = {
   "image-translation": [
+    "一键翻译",
+    "快速翻译",
+    "开始翻译",
+    "提交翻译",
     "apply translation",
     "start translation",
     "translate now",
@@ -297,6 +717,11 @@ const MEDIA_APPLY_KEYWORDS: Record<MediaToolDefinition["id"], string[]> = {
     "save"
   ],
   "image-editor": [
+    "\u786e\u5b9a",
+    "\u786e\u8ba4",
+    "\u4fdd\u5b58",
+    "\u5e94\u7528",
+    "\u5b8c\u6210",
     "apply edit",
     "save image",
     "finish editing",
@@ -306,6 +731,10 @@ const MEDIA_APPLY_KEYWORDS: Record<MediaToolDefinition["id"], string[]> = {
     "save"
   ],
   "batch-resize": [
+    "生成JPG图片",
+    "生成PNG图片",
+    "生成图片",
+    "批量改图片尺寸",
     "apply resize",
     "resize now",
     "batch resize",
@@ -324,6 +753,10 @@ const MEDIA_APPLY_KEYWORDS: Record<MediaToolDefinition["id"], string[]> = {
 }
 
 const MEDIA_CLOSE_KEYWORDS = [
+  "\u5173\u95ed",
+  "\u53d6\u6d88",
+  "\u8fd4\u56de",
+  "\u5b8c\u6210",
   "close",
   "done",
   "finish",
@@ -332,6 +765,127 @@ const MEDIA_CLOSE_KEYWORDS = [
   "return",
   "cancel"
 ]
+
+const IMAGE_TRANSLATION_DIRECT_MENU_KEYWORDS = [
+  "\u4e2d\u6587\u2192\u82f1\u6587",
+  "\u4e2d\u6587 \u2192 \u82f1\u6587",
+  "\u4e2d\u6587->\u82f1\u6587",
+  "\u4e2d\u6587 -> \u82f1\u6587",
+  "\u4e2d\u6587\u5230\u82f1\u6587",
+  "\u4e2d\u6587 \u5230 \u82f1\u6587",
+  "\u4e2d\u8bd1\u82f1",
+  "chinese\u2192english",
+  "chinese \u2192 english",
+  "chinese -> english"
+]
+
+const IMAGE_TRANSLATION_MENU_TRIGGER_KEYWORDS = [
+  "\u4e00\u952e\u7ffb\u8bd1",
+  "\u5feb\u901f\u7ffb\u8bd1",
+  "\u7ffb\u8bd1",
+  "translate",
+  "translation"
+]
+
+const IMAGE_TRANSLATION_ALIBABA_ENGINE_MENU_KEYWORDS = [
+  "\u963f\u91cc\u7ffb\u8bd1",
+  "\u963f\u91cc",
+  "alibaba"
+]
+
+const IMAGE_TRANSLATION_SOURCE_LANGUAGE_KEYWORDS = [
+  "\u4e2d\u6587",
+  "\u7b80\u4f53\u4e2d\u6587",
+  "chinese",
+  "chinese (simplified)"
+]
+
+const IMAGE_TRANSLATION_TARGET_LANGUAGE_KEYWORDS = [
+  "\u82f1\u6587",
+  "\u82f1\u8bed",
+  "english"
+]
+
+const IMAGE_TRANSLATION_RESULT_DIALOG_HINTS = [
+  "\u56fe\u7247\u7ffb\u8bd1",
+  "\u7ffb\u8bd1\u5b8c\u6210",
+  "\u624b\u52a8\u8c03\u6574",
+  "\u4fdd\u7559\u539f\u56fe",
+  "\u5f3a\u5236\u8bc6\u522b",
+  "\u72b6\u6001",
+  "\u8be6\u60c5",
+  "\u5df2\u7ffb\u8bd1\u6210\u529f",
+  "\u7ffb\u8bd1\u5931\u8d25"
+]
+
+const IMAGE_TRANSLATION_RESULT_CONFIRM_KEYWORDS = [
+  "\u786e\u8ba4",
+  "\u786e\u5b9a",
+  "\u5b8c\u6210",
+  "\u4f7f\u7528",
+  "\u5e94\u7528",
+  "\u4fdd\u5b58",
+  "\u77e5\u9053\u4e86",
+  "\u6211\u77e5\u9053\u4e86",
+  "\u7ee7\u7eed",
+  "confirm",
+  "apply",
+  "save",
+  "done"
+]
+
+const IMAGE_TRANSLATION_DIALOG_HINT_KEYWORDS = [
+  ...IMAGE_TRANSLATION_RESULT_DIALOG_HINTS,
+  "\u5feb\u901f\u7ffb\u8bd1",
+  "\u4e00\u952e\u7ffb\u8bd1",
+  "\u81ea\u5b9a\u4e49\u7ffb\u8bd1",
+  "\u9ad8\u7ea7\u7ffb\u8bd1",
+  "\u6e90\u8bed\u8a00",
+  "\u76ee\u6807\u8bed\u8a00",
+  "\u963f\u91cc\u7ffb\u8bd1"
+]
+
+const IMAGE_CHECK_DIALOG_HINT_KEYWORDS = [
+  "\u56fe\u7247\u68c0\u6d4b",
+  "\u56fe\u7247\u5305\u542b\u6587\u5b57",
+  "\u6c34\u5370",
+  "\u4ea7\u54c1\u56fe\u5c3a\u5bf8\u4e0d\u5408\u89c4",
+  "\u63cf\u8ff0\u56fe\u5c3a\u5bf8\u4e0d\u5408\u89c4",
+  "\u56fe\u7247\u8fc7\u5927",
+  "\u56fe\u7247\u94fe\u63a5\u5931\u6548",
+  "\u6279\u91cf\u64cd\u4f5c"
+]
+
+const IMAGE_TRANSLATION_RESULT_READY_KEYWORDS = [
+  "\u624b\u52a8\u8c03\u6574",
+  "\u4fdd\u7559\u539f\u56fe",
+  "\u5f3a\u5236\u8bc6\u522b",
+  "\u8bd1\u56fe",
+  "\u4e2d\u6587-\u82f1\u6587",
+  "\u4e2d\u6587-\u82f1\u8bed",
+  "\u82f1\u6587-\u4e2d\u6587",
+  "\u82f1\u8bed-\u4e2d\u6587"
+]
+
+const IMAGE_TRANSLATION_RESULT_PATTERN = /(?:\u5df2)?\u7ffb\u8bd1\u6210\u529f\s*(\d+)\s*\u5f20(?:\u56fe\u7247|\u56fe)[\uff0c, ]*\u7ffb\u8bd1\u5931\u8d25\s*(\d+)\s*\u5f20(?:\u56fe\u7247|\u56fe)/i
+const IMAGE_TRANSLATION_STATUS_PATTERN = /\u72b6\u6001[:\uff1a]?\s*([^\s\uff0c,.\u3002]+)/i
+const IMAGE_TRANSLATION_IN_PROGRESS_STATUS_KEYWORDS = [
+  "\u8fdb\u884c\u4e2d",
+  "\u5904\u7406\u4e2d",
+  "\u7ffb\u8bd1\u4e2d",
+  "\u6392\u961f\u4e2d",
+  "\u7b49\u5f85\u4e2d"
+]
+const IMAGE_TRANSLATION_SUCCESS_STATUS_KEYWORDS = [
+  "\u5b8c\u6210",
+  "\u5df2\u5b8c\u6210",
+  "\u6210\u529f",
+  "done",
+  "finished",
+  "completed",
+  "success"
+]
+const IMAGE_TRANSLATION_COMPLETION_TIMEOUT_MS = 300_000
 
 const SAVE_BUTTON_KEYWORDS = [
   "\u4fdd\u5b58\u8349\u7a3f",
@@ -396,17 +950,789 @@ const countVisible = async (locator: Locator, maxCount = 80) => {
 }
 
 const safeArtifactName = (value: string) => value.replace(/[^a-z0-9-]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase()
+const cleanVisibleText = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim()
+const DEFAULT_ORIGIN_COUNTRY = "\u4e2d\u56fd\u5927\u9646"
+const DEFAULT_ORIGIN_PROVINCE = "\u6d59\u6c5f\u7701"
+const SELECT_PLACEHOLDER_TEXT = "\u8bf7\u9009\u62e9"
+const SITE_WAREHOUSE_LABEL_TEXT = "\u9009\u62e9\u4ed3\u5e93"
+const SITE_WAREHOUSE_REQUIRED_TEXT = "\u8bf7\u9009\u62e9\u7ad9\u70b9\u4ed3\u5e93"
+const SITE_WAREHOUSE_SYNC_KEYWORDS = ["\u540c\u6b65"]
+const SHIPMENT_PROMISE_LABEL_TEXT = "\u627f\u8bfa\u53d1\u8d27\u65f6\u6548"
+const SHIPMENT_PROMISE_REQUIRED_TEXT = "\u8bf7\u9009\u62e9\u627f\u8bfa\u53d1\u8d27\u65f6\u6548"
+const SHIPMENT_PROMISE_OPTION_TEXTS = [
+  "1\u4e2a\u5de5\u4f5c\u65e5\u5185\u53d1\u8d27",
+  "2\u4e2a\u5de5\u4f5c\u65e5\u5185\u53d1\u8d27",
+  "7\u4e2a\u5de5\u4f5c\u65e5\u5185\u53d1\u8d27",
+  "9\u4e2a\u5de5\u4f5c\u65e5\u5185\u53d1\u8d27"
+]
+const FREIGHT_TEMPLATE_LABEL_TEXT = "\u8fd0\u8d39\u6a21\u677f"
+const FREIGHT_TEMPLATE_REQUIRED_TEXT = "\u8bf7\u9009\u62e9\u8fd0\u8d39\u6a21\u677f"
+const SHIPMENT_SYNC_KEYWORDS = ["\u540c\u6b65"]
+const REPAIR_DECLARED_PRICE_FALLBACK = "9.99"
+const REPAIR_SKU_LENGTH_FALLBACK = "35"
+const REPAIR_SKU_WIDTH_FALLBACK = "25"
+const REPAIR_SKU_HEIGHT_FALLBACK = "1"
+const REPAIR_SKU_WEIGHT_G_FALLBACK = "180"
+const COLOR_SKC_MAX_GROUPS = 20
+const COLOR_SKC_RECALC_TIMEOUT_MS = 15_000
+const COLOR_SKC_OPTION_WAIT_TIMEOUT_MS = 8_000
+const COLOR_SKC_OPTION_HYDRATE_TIMEOUT_MS = 30_000
+const COLOR_SKC_OPTION_REVEAL_TIMEOUT_MS = 10_000
+const COLOR_SKC_SECTION_SELECTOR = ".skuAttrItem_1001"
+const COLOR_SKC_ROW_SELECTOR = ".batch-table-wrap.color-table tbody tr"
+const COLOR_SKC_OPTION_SELECTORS = [
+  "label.d-checkbox.mr-8",
+  ".sku-option label.d-checkbox",
+  "label.d-checkbox",
+  ".checkbox-group-with-search label",
+  ".options-module label",
+  ".theme-value-edit",
+  ".theme-value-text",
+  ".options-module .theme-value-edit",
+  ".options-module .theme-value-text"
+]
+const COLOR_SKC_REMAP_KEYWORDS = ["重新对应变种", "重新对应"]
+const SIZE_CHART_TEMPLATE_SUFFIX = "\u5e97\u5c0f\u79d8\u6a21\u677f"
+
+const readVisibleText = async (locator: Locator | null) =>
+  locator ? cleanVisibleText(await locator.innerText().catch(() => "")) : ""
+
+const visibleAntModalLocators = async (page: Page) => {
+  const modals = page.locator(".ant-modal:visible")
+  const modalCount = Math.min(await modals.count().catch(() => 0), 12)
+  const visibleModals: Locator[] = []
+
+  for (let index = 0; index < modalCount; index += 1) {
+    const modal = modals.nth(index)
+    if (await modal.isVisible().catch(() => false)) {
+      visibleModals.push(modal)
+    }
+  }
+
+  return visibleModals
+}
+
+const visibleAntModalWrapLocators = async (page: Page) => {
+  const wraps = page.locator(".ant-modal-wrap:visible")
+  const wrapCount = Math.min(await wraps.count().catch(() => 0), 12)
+  const visibleWraps: Locator[] = []
+
+  for (let index = 0; index < wrapCount; index += 1) {
+    const wrap = wraps.nth(index)
+    if (await wrap.isVisible().catch(() => false)) {
+      visibleWraps.push(wrap)
+    }
+  }
+
+  return visibleWraps
+}
+
+const visibleModalCandidates = async (page: Page) => {
+  const seen = new Set<string>()
+  const dialogs: Locator[] = []
+
+  for (const dialog of [
+    ...await visibleAntModalLocators(page),
+    ...await visibleAntModalWrapLocators(page),
+    ...await visibleDialogLocators(page)
+  ]) {
+    const key = await locatorIdentityKey(dialog)
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    dialogs.push(dialog)
+  }
+
+  return dialogs
+}
+
+const waitForVisibleModalCandidateCountAtMost = async (page: Page, maximumVisibleDialogs: number, timeoutMs = 8_000) => {
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if ((await visibleModalCandidates(page)).length <= maximumVisibleDialogs) {
+      return true
+    }
+
+    await page.waitForTimeout(250)
+  }
+
+  return (await visibleModalCandidates(page)).length <= maximumVisibleDialogs
+}
+
+const locatorIdentityKey = async (locator: Locator) =>
+  locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    const className = typeof (element as HTMLElement).className === "string"
+      ? (element as HTMLElement).className
+      : ""
+    const text = (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 80)
+    return [
+      element.tagName.toLowerCase(),
+      className.slice(0, 120),
+      `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}`,
+      text
+    ].join("|")
+  }).catch(() => "")
+
+const isLikelyFloatingPanel = async (locator: Locator) =>
+  locator.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false
+    }
+
+    const style = window.getComputedStyle(element)
+    const rect = element.getBoundingClientRect()
+    const zIndex = Number.parseInt(style.zIndex || "0", 10)
+    const className = typeof element.className === "string" ? element.className : ""
+    const text = (element.textContent ?? "").replace(/\s+/g, " ").trim()
+    const hasInteractiveDescendant = Boolean(element.querySelector(
+      "button, [role='button'], input, select, textarea, .ant-btn, .ant-select, .ant-dropdown-menu-item"
+    ))
+    const looksFloating = ["fixed", "absolute", "sticky"].includes(style.position) || zIndex >= 100
+    const looksPanelClass = /(dialog|modal|popup|layer|drawer|overlay|result|preview|translate|editor)/i.test(className)
+    const withinViewportBounds =
+      rect.width >= 180
+      && rect.height >= 80
+      && rect.width <= window.innerWidth * 0.98
+      && rect.height <= window.innerHeight * 0.95
+    const nearViewport = rect.top < window.innerHeight && rect.left < window.innerWidth
+
+    return looksFloating
+      && looksPanelClass
+      && withinViewportBounds
+      && nearViewport
+      && hasInteractiveDescendant
+      && text.length > 0
+  }).catch(() => false)
+
+const collectLikelyFloatingPanels = async (page: Page, maxCount = 40) => {
+  const roots = page.locator("body > div, body > section, body > aside")
+  const count = Math.min(await roots.count().catch(() => 0), maxCount)
+  const panels: Locator[] = []
+
+  for (let index = 0; index < count; index += 1) {
+    const item = roots.nth(index)
+    if (!await item.isVisible().catch(() => false)) {
+      continue
+    }
+
+    if (await isLikelyFloatingPanel(item)) {
+      panels.push(item)
+    }
+  }
+
+  return panels
+}
+
+const isLikelyDialogContainer = async (locator: Locator) =>
+  locator.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false
+    }
+
+    const style = window.getComputedStyle(element)
+    const rect = element.getBoundingClientRect()
+    const className = typeof element.className === "string" ? element.className : ""
+    const role = element.getAttribute("role") ?? ""
+    const text = (element.textContent ?? "").replace(/\s+/g, " ").trim()
+    const interactiveCount = element.querySelectorAll(
+      "button, [role='button'], input, select, textarea, .ant-btn, .ant-select, .ant-dropdown-menu-item"
+    ).length
+    const hasCloseControl = Boolean(element.querySelector(
+      ".ant-modal-close, .el-dialog__headerbtn, .modal-close, [class*='close'], [id*='close' i], [aria-label*='close' i], [title*='close' i]"
+    ))
+    const hasDialogSemantics =
+      role === "dialog"
+      || element.getAttribute("aria-modal") === "true"
+      || /(dialog|modal|popup|drawer|translate|preview|editor|crop)/i.test(className)
+    const mentionsMediaFlow = /(图片翻译|选择全部|一键翻译|快速翻译|批量改图片尺寸|批量编辑|开始翻译|确认翻译|image translation|white background|image editor|review and save image edits|save image|batch resize|image management|normalize image dimensions|file sizes|apply resize|use selected)/i.test(text)
+    const minimumHeight = hasDialogSemantics && (hasCloseControl || mentionsMediaFlow) ? 80 : 140
+    const withinBounds =
+      rect.width >= 260
+      && rect.height >= minimumHeight
+      && rect.width <= window.innerWidth
+      && rect.height <= window.innerHeight
+
+    return withinBounds
+      && hasDialogSemantics
+      && interactiveCount >= 2
+      && (hasCloseControl || mentionsMediaFlow)
+      && style.display !== "none"
+      && style.visibility !== "hidden"
+  }).catch(() => false)
+
+const waitForVisibleAntModalCountAtMost = async (page: Page, maximumVisibleDialogs: number, timeoutMs = 8_000) => {
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if ((await visibleAntModalLocators(page)).length <= maximumVisibleDialogs) {
+      return true
+    }
+
+    await page.waitForTimeout(250)
+  }
+
+  return (await visibleAntModalLocators(page)).length <= maximumVisibleDialogs
+}
+
+const selectAntOption = async (
+  page: Page,
+  select: Locator,
+  desiredTexts: string[],
+  searchText = desiredTexts[0] ?? ""
+) => {
+  await select.scrollIntoViewIfNeeded()
+  await select.click()
+  await page.waitForTimeout(250)
+
+  const searchInput = select.locator("input.ant-select-selection-search-input").first()
+  const canTypeSearch = searchText
+    && await searchInput.count().catch(() => 0) > 0
+    && await searchInput.isEditable().catch(() => false)
+
+  if (canTypeSearch) {
+    await searchInput.fill(searchText)
+    await page.waitForTimeout(350)
+  }
+
+  const currentValue = cleanVisibleText(await select.innerText().catch(() => ""))
+  if (currentValue && desiredTexts.some((text) => currentValue === text || currentValue.includes(text))) {
+    await page.keyboard.press("Escape").catch(() => {})
+    return currentValue
+  }
+
+  const options = page.locator(".ant-select-dropdown:visible .ant-select-item-option-content")
+  const optionCount = Math.min(await options.count().catch(() => 0), 120)
+  for (let index = 0; index < optionCount; index += 1) {
+    const option = options.nth(index)
+    const optionText = cleanVisibleText(await option.innerText().catch(() => ""))
+    if (!optionText) {
+      continue
+    }
+
+    const matched = desiredTexts.some((text) => optionText === text || optionText.includes(text))
+    if (!matched) {
+      continue
+    }
+
+    await option.click()
+    await page.waitForTimeout(250)
+    return optionText
+  }
+
+  await page.keyboard.press("Escape").catch(() => {})
+  return null
+}
+
+const findSiteWarehouseContainer = async (page: Page) => {
+  const locator = page.locator([
+    ".flex-y-center.whitespace-nowrap.mb-12",
+    ".sku-data-table",
+    ".ant-form-item",
+    "tr",
+    "div"
+  ].join(", ")).filter({
+    hasText: new RegExp(`${SITE_WAREHOUSE_LABEL_TEXT}|${SITE_WAREHOUSE_REQUIRED_TEXT}`, "i")
+  })
+
+  const count = Math.min(await locator.count().catch(() => 0), 60)
+  let best: {
+    item: Locator
+    score: number
+  } | null = null
+
+  for (let index = 0; index < count; index += 1) {
+    const item = locator.nth(index)
+    if (!await item.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const text = cleanVisibleText(await item.innerText().catch(() => ""))
+    if (!text.includes(SITE_WAREHOUSE_LABEL_TEXT)) {
+      continue
+    }
+
+    const selectCount = await countVisible(item.locator(".ant-select"), 10)
+    if (selectCount <= 0) {
+      continue
+    }
+
+    const syncCount = await countVisible(item.locator("button, a, [role='button'], .link, span").filter({
+      hasText: new RegExp(SITE_WAREHOUSE_SYNC_KEYWORDS.map(escapeRegExp).join("|"), "i")
+    }), 10)
+    const box = await item.boundingBox().catch(() => null)
+    const areaPenalty = box ? Math.round((box.width * box.height) / 1000) : 10_000
+    const score = text.length + areaPenalty + (selectCount * 200) - (syncCount * 120)
+
+    if (!best || score < best.score) {
+      best = {
+        item,
+        score
+      }
+    }
+  }
+
+  return best?.item ?? null
+}
+
+const readVisibleAntSelectOptions = async (page: Page) => {
+  const options = page.locator(".ant-select-dropdown:visible .ant-select-item-option")
+  const count = Math.min(await options.count().catch(() => 0), 120)
+  const collected: string[] = []
+
+  for (let index = 0; index < count; index += 1) {
+    const option = options.nth(index)
+    if (!await option.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const text = cleanVisibleText(await option.innerText().catch(() => ""))
+    if (text) {
+      collected.push(text)
+    }
+  }
+
+  return collected
+}
+
+const chooseFirstUsableAntSelectOption = async (
+  page: Page,
+  select: Locator
+) => {
+  await select.scrollIntoViewIfNeeded().catch(() => undefined)
+  await clickAfterDianxiaomiIdle(page, select, 2)
+  await page.waitForTimeout(350)
+
+  const optionNodes = page.locator(".ant-select-dropdown:visible .ant-select-item-option")
+  const optionCount = Math.min(await optionNodes.count().catch(() => 0), 120)
+  const optionTexts: string[] = []
+
+  for (let index = 0; index < optionCount; index += 1) {
+    const option = optionNodes.nth(index)
+    if (!await option.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const optionText = cleanVisibleText(await option.innerText().catch(() => ""))
+    if (!optionText) {
+      continue
+    }
+    optionTexts.push(optionText)
+
+    const normalized = optionText.toLowerCase()
+    if (
+      normalized.includes(SELECT_PLACEHOLDER_TEXT.toLowerCase())
+      || normalized.includes("\u65e0\u6570\u636e")
+      || normalized.includes("\u6682\u65e0")
+      || normalized.includes("\u672a\u914d\u7f6e")
+      || normalized.includes("\u8bf7\u5148")
+    ) {
+      continue
+    }
+
+    await clickAfterDianxiaomiIdle(page, option, 2)
+    await page.waitForTimeout(350)
+    return {
+      selectedText: optionText,
+      optionTexts
+    }
+  }
+
+  await page.keyboard.press("Escape").catch(() => {})
+  return {
+    selectedText: null,
+    optionTexts
+  }
+}
+
+const normalizeSiteWarehouse = async (page: Page) => {
+  const container = await findSiteWarehouseContainer(page)
+  if (!container) {
+    return stepResult(
+      "normalize-site-warehouse",
+      "Normalize site warehouse",
+      "skipped",
+      "Site warehouse controls are not visible"
+    )
+  }
+
+  const warehouseSelect = await firstVisible([
+    container.locator(".ant-select").filter({ hasText: new RegExp(SELECT_PLACEHOLDER_TEXT, "i") }),
+    container.locator(".ant-select")
+  ])
+  if (!warehouseSelect) {
+    return stepResult(
+      "normalize-site-warehouse",
+      "Normalize site warehouse",
+      "skipped",
+      "Site warehouse select is not visible"
+    )
+  }
+
+  const beforeText = await readVisibleText(warehouseSelect)
+  const alreadySelected = beforeText && !beforeText.includes(SELECT_PLACEHOLDER_TEXT)
+  if (alreadySelected) {
+    return stepResult(
+      "normalize-site-warehouse",
+      "Normalize site warehouse",
+      "skipped",
+      `Site warehouse is already set: ${beforeText}`,
+      {
+        beforeText,
+        afterText: beforeText
+      }
+    )
+  }
+
+  const syncButton = await findInteractiveInRootByKeywords(container, SITE_WAREHOUSE_SYNC_KEYWORDS)
+  let syncClicked = false
+  if (syncButton && await syncButton.isVisible().catch(() => false)) {
+    await clickAfterDianxiaomiIdle(page, syncButton, 2).catch(() => undefined)
+    syncClicked = true
+    await page.waitForTimeout(1_200)
+  }
+
+  const selection = await chooseFirstUsableAntSelectOption(page, warehouseSelect)
+  const afterText = await readVisibleText(warehouseSelect)
+  const success = Boolean(selection.selectedText || (afterText && !afterText.includes(SELECT_PLACEHOLDER_TEXT)))
+
+  return stepResult(
+    "normalize-site-warehouse",
+    "Normalize site warehouse",
+    success ? "done" : "failed",
+    success
+      ? `Site warehouse set to ${selection.selectedText ?? afterText}`
+      : "Could not select a site warehouse option",
+    {
+      beforeText,
+      afterText,
+      syncClicked,
+      optionTexts: selection.optionTexts
+    }
+  )
+}
+
+const findShipmentFieldContainer = async (
+  page: Page,
+  labelText: string,
+  options: {
+    requireSelect?: boolean
+    penalizeTexts?: string[]
+  } = {}
+) => {
+  const locator = page.locator([
+    ".shipment-wrapper .ant-form-item",
+    ".shipment-wrapper .ant-row.ant-form-item-row",
+    ".shipment-wrapper div",
+    ".ant-form-item",
+    ".ant-row.ant-form-item-row",
+    "div"
+  ].join(", ")).filter({
+    hasText: new RegExp(escapeRegExp(labelText), "i")
+  })
+
+  const count = Math.min(await locator.count().catch(() => 0), 80)
+  let best: {
+    item: Locator
+    score: number
+  } | null = null
+
+  for (let index = 0; index < count; index += 1) {
+    const item = locator.nth(index)
+    if (!await item.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const text = cleanVisibleText(await item.innerText().catch(() => ""))
+    if (!text.includes(labelText)) {
+      continue
+    }
+
+    const selectCount = await countVisible(item.locator(".ant-select"), 10)
+    if (options.requireSelect && selectCount <= 0) {
+      continue
+    }
+
+    const className = await item.evaluate((element) =>
+      typeof (element as HTMLElement).className === "string"
+        ? (element as HTMLElement).className
+        : ""
+    ).catch(() => "")
+    const box = await item.boundingBox().catch(() => null)
+    const areaPenalty = box ? Math.round((box.width * box.height) / 1000) : 10_000
+    const labelPenalty = (options.penalizeTexts ?? []).reduce((penalty, keyword) =>
+      text.includes(keyword) ? penalty + 160 : penalty
+    , 0)
+    const score =
+      text.length
+      + areaPenalty
+      + (options.requireSelect ? Math.abs(selectCount - 1) * 180 : selectCount * 120)
+      + (/ant-form-item/i.test(className) ? -120 : 80)
+      + labelPenalty
+
+    if (!best || score < best.score) {
+      best = {
+        item,
+        score
+      }
+    }
+  }
+
+  return best?.item ?? null
+}
+
+const readChoiceLikeState = async (locator: Locator | null) =>
+  locator?.evaluate((element) => {
+    const clean = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim()
+    const candidates = [
+      element,
+      element.closest("label"),
+      element.closest("[role='radio']"),
+      element.closest("[role='button']"),
+      element.closest("[class*='radio' i]"),
+      element.closest("[class*='option' i]"),
+      element.closest("[class*='tag' i]")
+    ].filter(Boolean) as HTMLElement[]
+    const className = candidates
+      .map((item) => typeof item.className === "string" ? item.className : "")
+      .filter(Boolean)
+      .join(" ")
+      .trim()
+    const firstAttr = (name: string) =>
+      candidates
+        .map((item) => item.getAttribute(name))
+        .find((value) => Boolean(value)) ?? ""
+
+    return {
+      text: clean(element.textContent),
+      className,
+      role: firstAttr("role"),
+      ariaChecked: firstAttr("aria-checked"),
+      ariaSelected: firstAttr("aria-selected"),
+      ariaDisabled: firstAttr("aria-disabled"),
+      dataChecked: firstAttr("data-checked"),
+      dataSelected: firstAttr("data-selected")
+    }
+  }).catch(() => null) ?? null
+
+const choiceLooksSelected = (state: Awaited<ReturnType<typeof readChoiceLikeState>>) => {
+  if (!state) {
+    return false
+  }
+
+  return state.ariaChecked === "true"
+    || state.ariaSelected === "true"
+    || state.dataChecked === "true"
+    || state.dataSelected === "true"
+    || /(checked|selected|active|current|chosen|ant-radio-wrapper-checked|ant-segmented-item-selected)/i.test(state.className)
+}
+
+const choiceLooksDisabled = (state: Awaited<ReturnType<typeof readChoiceLikeState>>) => {
+  if (!state) {
+    return false
+  }
+
+  return state.ariaDisabled === "true"
+    || /(disabled|forbidden)/i.test(state.className)
+}
+
+const normalizeShipmentPromise = async (page: Page) => {
+  const promiseRows = page.locator(".shipment-wrapper .ant-form-item").filter({
+    hasText: new RegExp(escapeRegExp(SHIPMENT_PROMISE_LABEL_TEXT), "i")
+  })
+  const promiseRowCount = Math.min(await promiseRows.count().catch(() => 0), 20)
+  let row: Locator | null = null
+
+  for (let index = 0; index < promiseRowCount; index += 1) {
+    const candidate = promiseRows.nth(index)
+    if (!await candidate.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const radioCount = await countVisible(candidate.locator("label.ant-radio-wrapper"), 10)
+    if (radioCount <= 0) {
+      continue
+    }
+
+    row = candidate
+    break
+  }
+  if (!row) {
+    return stepResult(
+      "normalize-shipment-promise",
+      "Normalize shipment promise",
+      "skipped",
+      "Shipment promise controls are not visible"
+    )
+  }
+
+  const radioLocator = row.locator("label.ant-radio-wrapper")
+  const radioCount = Math.min(await radioLocator.count().catch(() => 0), 40)
+  const optionCandidates: Array<{
+    optionText: string
+    locator: Locator
+    text: string
+    checked: boolean
+  }> = []
+
+  for (let index = 0; index < radioCount; index += 1) {
+    const item = radioLocator.nth(index)
+    if (!await item.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const text = cleanVisibleText(await item.innerText().catch(() => ""))
+    const optionText = SHIPMENT_PROMISE_OPTION_TEXTS.find((option) => text === option || text.includes(option))
+    if (!optionText) {
+      continue
+    }
+
+    const checked = await item.locator("input[type='radio']").first()
+      .evaluate((element) => (element as HTMLInputElement).checked)
+      .catch(() => false)
+    optionCandidates.push({
+      optionText,
+      locator: item,
+      text,
+      checked
+    })
+  }
+
+  const candidateTexts = optionCandidates.map((candidate) => candidate.text)
+  const selectedCandidate = optionCandidates.find((candidate) => candidate.checked)
+  if (selectedCandidate) {
+    return stepResult(
+      "normalize-shipment-promise",
+      "Normalize shipment promise",
+      "skipped",
+      `Shipment promise is already set: ${selectedCandidate.optionText}`,
+      {
+        selectedText: selectedCandidate.optionText,
+        candidateTexts
+      }
+    )
+  }
+
+  const target = SHIPMENT_PROMISE_OPTION_TEXTS
+    .map((optionText) => optionCandidates.find((candidate) => candidate.optionText === optionText) ?? null)
+    .find(Boolean) ?? null
+
+  if (!target) {
+    return stepResult(
+      "normalize-shipment-promise",
+      "Normalize shipment promise",
+      "failed",
+      "Could not find a usable shipment promise option",
+      {
+        candidateTexts
+      }
+    )
+  }
+
+  await target.locator.scrollIntoViewIfNeeded().catch(() => undefined)
+  await clickAfterDianxiaomiIdle(page, target.locator, 2)
+  await page.waitForTimeout(450)
+
+  const verifiedSelected = await target.locator.locator("input[type='radio']").first()
+    .evaluate((element) => (element as HTMLInputElement).checked)
+    .catch(() => false)
+  return stepResult(
+    "normalize-shipment-promise",
+    "Normalize shipment promise",
+    "done",
+    verifiedSelected
+      ? `Shipment promise set to ${target.optionText}`
+      : `Clicked shipment promise option ${target.optionText}`,
+    {
+      selectedText: target.optionText,
+      verifiedSelected,
+      candidateTexts
+    }
+  )
+}
+
+const normalizeFreightTemplate = async (page: Page) => {
+  const row = await findShipmentFieldContainer(page, FREIGHT_TEMPLATE_LABEL_TEXT, {
+    requireSelect: true,
+    penalizeTexts: [SHIPMENT_PROMISE_LABEL_TEXT]
+  })
+  if (!row) {
+    return stepResult(
+      "normalize-freight-template",
+      "Normalize freight template",
+      "skipped",
+      "Freight template controls are not visible"
+    )
+  }
+
+  const templateSelect = await firstVisible([
+    row.locator(".ant-select").filter({ hasText: new RegExp(SELECT_PLACEHOLDER_TEXT, "i") }),
+    row.locator(".ant-select")
+  ])
+  if (!templateSelect) {
+    return stepResult(
+      "normalize-freight-template",
+      "Normalize freight template",
+      "skipped",
+      "Freight template select is not visible"
+    )
+  }
+
+  const beforeText = await readVisibleText(templateSelect)
+  const alreadySelected = beforeText && !beforeText.includes(SELECT_PLACEHOLDER_TEXT)
+  if (alreadySelected) {
+    return stepResult(
+      "normalize-freight-template",
+      "Normalize freight template",
+      "skipped",
+      `Freight template is already set: ${beforeText}`,
+      {
+        beforeText,
+        afterText: beforeText
+      }
+    )
+  }
+
+  const syncButton = await findInteractiveInRootByKeywords(row, SHIPMENT_SYNC_KEYWORDS)
+  let syncClicked = false
+  if (syncButton && await syncButton.isVisible().catch(() => false)) {
+    await clickAfterDianxiaomiIdle(page, syncButton, 2).catch(() => undefined)
+    syncClicked = true
+    await page.waitForTimeout(1_000)
+  }
+
+  const selection = await chooseFirstUsableAntSelectOption(page, templateSelect)
+  const afterText = await readVisibleText(templateSelect)
+  const success = Boolean(selection.selectedText || (afterText && !afterText.includes(SELECT_PLACEHOLDER_TEXT)))
+
+  return stepResult(
+    "normalize-freight-template",
+    "Normalize freight template",
+    success ? "done" : "failed",
+    success
+      ? `Freight template set to ${selection.selectedText ?? afterText}`
+      : "Could not select a freight template option",
+    {
+      beforeText,
+      afterText,
+      syncClicked,
+      optionTexts: selection.optionTexts
+    }
+  )
+}
 
 export const findFieldByKeyword = async (page: Page, keywords: string[]) => {
   const uniqueKeywords = Array.from(new Set(keywords))
   const selectorLocators = uniqueKeywords.flatMap((keyword) => [
     page.getByLabel(keyword, { exact: false }),
     page.getByPlaceholder(keyword, { exact: false }),
-    page.locator(`input[name*="${keyword}" i], textarea[name*="${keyword}" i]`),
-    page.locator(`input[aria-label*="${keyword}" i], textarea[aria-label*="${keyword}" i]`)
+    page.locator(`input:not([type='checkbox']):not([type='radio']):not([type='button']):not([type='submit']):not([type='file'])[name*="${keyword}" i], textarea[name*="${keyword}" i]`),
+    page.locator(`input:not([type='checkbox']):not([type='radio']):not([type='button']):not([type='submit']):not([type='file'])[aria-label*="${keyword}" i], textarea[aria-label*="${keyword}" i]`)
   ])
 
-  const directMatch = await firstVisible(selectorLocators)
+  const directMatch = await firstVisibleTextWritable(selectorLocators)
   if (directMatch) {
     return directMatch
   }
@@ -426,7 +1752,7 @@ export const findFieldByKeyword = async (page: Page, keywords: string[]) => {
     ]
 
     for (const container of containers) {
-      const field = await firstVisible([container.locator(EDITABLE_SELECTOR)])
+      const field = await firstVisibleTextWritable([container.locator(EDITABLE_SELECTOR)])
       if (field) {
         return field
       }
@@ -449,6 +1775,9 @@ const fillTextField = async (field: Locator, value: string) => {
   await field.scrollIntoViewIfNeeded()
   const tagName = await field.evaluate((element) => element.tagName.toLowerCase())
   const isContentEditable = await field.evaluate((element) => element.getAttribute("contenteditable") === "true")
+  const inputType = tagName === "input"
+    ? await field.evaluate((element) => (element as HTMLInputElement).type || "").catch(() => "")
+    : ""
 
   if (isContentEditable) {
     await field.click()
@@ -458,6 +1787,9 @@ const fillTextField = async (field: Locator, value: string) => {
   }
 
   if (tagName === "input" || tagName === "textarea") {
+    if (["checkbox", "radio", "button", "submit", "file"].includes(inputType.toLowerCase())) {
+      throw new Error(`unsupported text fill target: input[type=${inputType || "unknown"}]`)
+    }
     await field.fill(value)
     return
   }
@@ -466,7 +1798,793 @@ const fillTextField = async (field: Locator, value: string) => {
   await field.type(value)
 }
 
+const isTextWritableField = async (field: Locator | null) => {
+  if (!field || !await field.isVisible().catch(() => false)) {
+    return false
+  }
+
+  const fieldMeta = await field.evaluate((element) => {
+    const tagName = element.tagName.toLowerCase()
+    const contentEditable = element.getAttribute("contenteditable") === "true"
+    const inputType = tagName === "input" ? ((element as HTMLInputElement).type || "").toLowerCase() : ""
+    return {
+      tagName,
+      contentEditable,
+      inputType
+    }
+  }).catch(() => null as { tagName: string; contentEditable: boolean; inputType: string } | null)
+
+  if (!fieldMeta) {
+    return false
+  }
+
+  if (fieldMeta.contentEditable || fieldMeta.tagName === "textarea") {
+    return true
+  }
+
+  if (fieldMeta.tagName !== "input") {
+    return false
+  }
+
+  return !["checkbox", "radio", "button", "submit", "file"].includes(fieldMeta.inputType)
+}
+
+const firstVisibleTextWritable = async (locators: Locator[]) => {
+  for (const locator of locators) {
+    const count = await locator.count().catch(() => 0)
+
+    for (let index = 0; index < count; index += 1) {
+      const item = locator.nth(index)
+      if (await isTextWritableField(item)) {
+        return item
+      }
+    }
+  }
+
+  return null
+}
+
+const normalizeMaterialComposition = async (page: Page) => {
+  const compositionItems = page.locator(".attr-form-item").filter({
+    hasText: "\u6210\u5206"
+  })
+  const compositionCount = Math.min(await compositionItems.count().catch(() => 0), 4)
+  let normalizedGroups = 0
+  let removedRows = 0
+  let updatedPercentInputs = 0
+  const blockedGroups: string[] = []
+
+  for (let index = 0; index < compositionCount; index += 1) {
+    const item = compositionItems.nth(index)
+    const selectTexts = await item.locator(".ant-select").evaluateAll((nodes) =>
+      nodes.map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim())
+    ).catch(() => [] as string[])
+    const blankSelectCount = selectTexts.filter((text) => text.includes(SELECT_PLACEHOLDER_TEXT)).length
+
+    if (blankSelectCount === 0) {
+      continue
+    }
+
+    const percentInputs = item.locator("input.ant-input.input-number")
+    if (await percentInputs.count().catch(() => 0) === 0) {
+      blockedGroups.push(`composition-${index + 1}-missing-percent-input`)
+      continue
+    }
+
+    await fillTextField(percentInputs.first(), "100")
+    updatedPercentInputs += 1
+
+    const removeButtons = item.locator(".icon_remove")
+    let removedForGroup = 0
+    while (removedForGroup < blankSelectCount && await removeButtons.count().catch(() => 0) > 0) {
+      await removeButtons.last().click()
+      removedForGroup += 1
+      await page.waitForTimeout(250)
+    }
+
+    if (removedForGroup < blankSelectCount) {
+      blockedGroups.push(`composition-${index + 1}-remove-shortfall-${removedForGroup}/${blankSelectCount}`)
+      continue
+    }
+
+    normalizedGroups += 1
+    removedRows += removedForGroup
+  }
+
+  if (blockedGroups.length > 0) {
+    return stepResult(
+      "normalize-material-composition",
+      "Normalize material composition",
+      "failed",
+      "Could not fully normalize blank material composition rows",
+      {
+        compositionCount,
+        normalizedGroups,
+        removedRows,
+        updatedPercentInputs,
+        blockedGroups
+      }
+    )
+  }
+
+  if (normalizedGroups === 0) {
+    return stepResult(
+      "normalize-material-composition",
+      "Normalize material composition",
+      "skipped",
+      "No blank material composition rows required normalization",
+      {
+        compositionCount
+      }
+    )
+  }
+
+  return stepResult(
+    "normalize-material-composition",
+    "Normalize material composition",
+    "done",
+    `Normalized ${normalizedGroups} material composition group(s)`,
+    {
+      compositionCount,
+      normalizedGroups,
+      removedRows,
+      updatedPercentInputs
+    }
+  )
+}
+
+const normalizeOriginProvince = async (page: Page) => {
+  const originSelects = page.locator(".productOrigin .ant-select")
+  const selectCount = await originSelects.count().catch(() => 0)
+  if (selectCount < 2) {
+    return stepResult(
+      "normalize-origin-province",
+      "Normalize origin province",
+      "skipped",
+      "Origin country/province controls are not visible"
+    )
+  }
+
+  const countrySelect = originSelects.nth(0)
+  const provinceSelect = originSelects.nth(1)
+  const countryText = await readVisibleText(countrySelect)
+  const provinceText = await readVisibleText(provinceSelect)
+  const provinceMissing = !provinceText || provinceText.includes(SELECT_PLACEHOLDER_TEXT)
+
+  if (!countryText.includes(DEFAULT_ORIGIN_COUNTRY) || !provinceMissing) {
+    return stepResult(
+      "normalize-origin-province",
+      "Normalize origin province",
+      "skipped",
+      provinceMissing
+        ? `Origin country does not require default province handling: ${countryText || "unknown"}`
+        : `Origin province is already set: ${provinceText}`,
+      {
+        countryText,
+        provinceText
+      }
+    )
+  }
+
+  const selectedProvince = await selectAntOption(page, provinceSelect, [DEFAULT_ORIGIN_PROVINCE])
+  if (!selectedProvince) {
+    return stepResult(
+      "normalize-origin-province",
+      "Normalize origin province",
+      "failed",
+      `Could not select the default origin province: ${DEFAULT_ORIGIN_PROVINCE}`,
+      {
+        countryText,
+        provinceText
+      }
+    )
+  }
+
+  return stepResult(
+    "normalize-origin-province",
+    "Normalize origin province",
+    "done",
+    `Origin province set to ${selectedProvince}`,
+    {
+      countryText,
+      provinceText: selectedProvince
+    }
+  )
+}
+
+type SizeChartMetricState = {
+  totalMetricInputs: number
+  filledMetricInputs: number
+  sampleValues: string[]
+}
+
+type SizeChartManualFillResult = {
+  applied: boolean
+  reason: string
+  category: string
+  filledInputs: number
+  templateNameApplied?: string | null
+  rows: Array<{
+    sizeLabel: string
+    values: string[]
+  }>
+}
+
+const BRA_SIZE_CHART_CUP_HEIGHT_DEFAULTS: Record<string, string> = {
+  AA: "8",
+  A: "10",
+  B: "13",
+  C: "15",
+  D: "18",
+  E: "20",
+  F: "23",
+  G: "25",
+  H: "28",
+  I: "30"
+}
+
+const WOMENS_BOTTOM_SIZE_CHART_DEFAULTS: Record<string, [string, string, string, string]> = {
+  XS: ["62", "96", "98", "67"],
+  S: ["66", "100", "100", "68"],
+  M: ["70", "104", "102", "69"],
+  L: ["74", "108", "104", "70"],
+  XL: ["78", "112", "106", "71"],
+  XXL: ["82", "116", "108", "72"],
+  "ONE-SIZE": ["68", "104", "100", "68"],
+  "ONE SIZE": ["68", "104", "100", "68"],
+  "ONE-SIZE PETITE": ["64", "100", "94", "64"],
+  "ONE SIZE PETITE": ["64", "100", "94", "64"],
+  "PETITE XXS": ["58", "88", "92", "63"],
+  "PETITE XS": ["60", "92", "94", "64"],
+  "PETITE S": ["64", "96", "96", "65"],
+  "PETITE M": ["68", "100", "98", "66"],
+  "PETITE L": ["72", "104", "100", "67"],
+  "ASIAN XS": ["60", "92", "96", "66"],
+  "ASIAN S": ["64", "96", "98", "67"],
+  "ASIAN M": ["68", "100", "100", "68"],
+  "ASIAN L": ["72", "104", "102", "69"],
+  "ASIAN XL": ["76", "108", "104", "70"],
+  "ASIAN XXL": ["80", "112", "106", "71"],
+  "TALL XXS": ["60", "92", "100", "71"],
+  "TALL XS": ["62", "96", "102", "72"],
+  "TALL S": ["66", "100", "104", "73"],
+  "TALL M": ["70", "104", "106", "74"],
+  "TALL L": ["74", "108", "108", "75"],
+  "TALL XL": ["78", "112", "110", "76"],
+  "TALL XXL": ["82", "116", "112", "77"],
+  "25": ["64", "96", "99", "68"],
+  "26": ["66", "98", "100", "68"],
+  "27": ["68", "100", "101", "69"],
+  "28": ["70", "102", "102", "69"],
+  "29": ["72", "104", "103", "70"],
+  "30": ["74", "106", "104", "70"]
+}
+
+const WOMENS_BOTTOM_SIZE_CHART_FALLBACK = ["68", "100", "100", "68"] as const
+
+const normalizeSizeLabelKey = (value: string) =>
+  normalizeFeedbackText(value)
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase()
+
+const buildSizeChartTemplateName = (sizeCategoryText: string, rows: Array<{ sizeLabel: string }>) => {
+  const category = normalizeFeedbackText(sizeCategoryText).replace(/\s+/g, "")
+  const firstSize = rows[0]?.sizeLabel?.replace(/\s+/g, "") ?? ""
+  return `${category || "size"}-${firstSize || "auto"}-auto`.slice(0, 30)
+}
+
+const inspectSizeChartMetricState = async (modal: Locator): Promise<SizeChartMetricState> => {
+  const metrics = await modal.locator("input").evaluateAll((nodes) =>
+    nodes
+      .map((node) => {
+        const input = node as HTMLInputElement
+        return {
+          type: input.type,
+          value: input.value.trim(),
+          placeholder: (input.getAttribute("placeholder") ?? "").trim()
+        }
+      })
+      .filter((item) =>
+        item.type !== "search"
+        && item.type !== "checkbox"
+        && item.type !== "hidden"
+        && (item.placeholder.includes("\u8bf7\u8f93\u5165") || item.value.length > 0)
+      )
+  ).catch(() => [] as Array<{ type: string; value: string; placeholder: string }>)
+
+  const filledValues = metrics.map((item) => item.value).filter(Boolean)
+  return {
+    totalMetricInputs: metrics.length,
+    filledMetricInputs: filledValues.length,
+    sampleValues: filledValues.slice(0, 6)
+  }
+}
+
+const deriveBraSizeChartFallbackValues = (sizeLabel: string) => {
+  const normalized = normalizeFeedbackText(sizeLabel)
+    .replace(/\s+/g, "")
+    .replace(/[^0-9a-z]/gi, "")
+    .toUpperCase()
+  const matched = normalized.match(/(\d{2,3})([A-Z]{1,3})$/)
+  if (!matched) {
+    return null
+  }
+
+  const underbust = matched[1]
+  const cupCode = matched[2]
+  const cupHeight = BRA_SIZE_CHART_CUP_HEIGHT_DEFAULTS[cupCode]
+    ?? BRA_SIZE_CHART_CUP_HEIGHT_DEFAULTS[cupCode.slice(-1)]
+    ?? BRA_SIZE_CHART_CUP_HEIGHT_DEFAULTS.C
+
+  return [underbust, cupHeight]
+}
+
+const applyManualSizeChartFallback = async (modal: Locator, sizeCategoryText: string): Promise<SizeChartManualFillResult> => {
+  const category = normalizeFeedbackText(sizeCategoryText)
+  const isWomensBottomCategory =
+    category.includes("\u5973\u4e0b\u88c5")
+    || category.includes("\u4e0b\u88c5")
+    || category.includes("\u88e4\u5b50")
+    || category.toLowerCase().includes("pants")
+
+  if (isWomensBottomCategory) {
+    const rows = modal.locator("table tr")
+    const rowCount = Math.min(await rows.count().catch(() => 0), 16)
+    let filledInputs = 0
+    const filledRows: Array<{
+      sizeLabel: string
+      values: string[]
+    }> = []
+
+    for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+      const row = rows.nth(rowIndex)
+      if (!await row.isVisible().catch(() => false)) {
+        continue
+      }
+
+      const cells = row.locator("td")
+      if (await cells.count().catch(() => 0) < 2) {
+        continue
+      }
+
+      const sizeLabel = normalizeFeedbackText(await cells.first().innerText().catch(() => ""))
+      if (!sizeLabel) {
+        continue
+      }
+
+      const fallbackValues = WOMENS_BOTTOM_SIZE_CHART_DEFAULTS[normalizeSizeLabelKey(sizeLabel)]
+        ?? [...WOMENS_BOTTOM_SIZE_CHART_FALLBACK]
+      const inputCandidates = row.locator("input")
+      const inputCount = Math.min(await inputCandidates.count().catch(() => 0), 8)
+      const editableInputs: Locator[] = []
+      for (let inputIndex = 0; inputIndex < inputCount; inputIndex += 1) {
+        const input = inputCandidates.nth(inputIndex)
+        if (!await input.isVisible().catch(() => false)) {
+          continue
+        }
+
+        const inputType = await input.evaluate((element) => (element as HTMLInputElement).type || "").catch(() => "")
+        if (["checkbox", "radio", "search", "hidden", "button", "submit", "file"].includes(inputType.toLowerCase())) {
+          continue
+        }
+
+        editableInputs.push(input)
+      }
+
+      if (editableInputs.length === 0) {
+        continue
+      }
+
+      const appliedValues: string[] = []
+      for (let inputIndex = 0; inputIndex < Math.min(editableInputs.length, fallbackValues.length); inputIndex += 1) {
+        const input = editableInputs[inputIndex]
+        const currentValue = await readFieldValue(input).catch(() => "")
+        if (currentValue.trim()) {
+          appliedValues.push(currentValue.trim())
+          continue
+        }
+
+        const nextValue = fallbackValues[inputIndex] ?? fallbackValues.at(-1) ?? ""
+        if (!nextValue) {
+          continue
+        }
+
+        await fillTextField(input, nextValue)
+        const actualValue = await readFieldValue(input).catch(() => "")
+        if (actualValue.trim()) {
+          filledInputs += 1
+          appliedValues.push(actualValue.trim())
+        }
+      }
+
+      if (appliedValues.length > 0) {
+        filledRows.push({
+          sizeLabel,
+          values: appliedValues
+        })
+      }
+    }
+
+    return {
+      applied: filledInputs > 0,
+      reason: filledInputs > 0
+        ? `Filled ${filledInputs} blank metric inputs from women-bottom defaults`
+        : "No compatible blank metric inputs were filled",
+      category,
+      filledInputs,
+      templateNameApplied: null,
+      rows: filledRows
+    }
+  }
+  if (!category.includes("文胸")) {
+    return {
+      applied: false,
+      reason: `Manual size chart fallback is not configured for category ${category || "unknown"}`,
+      category,
+      filledInputs: 0,
+      templateNameApplied: null,
+      rows: []
+    }
+  }
+
+  const rows = modal.locator("table tr")
+  const rowCount = Math.min(await rows.count().catch(() => 0), 12)
+  let filledInputs = 0
+  const filledRows: Array<{
+    sizeLabel: string
+    values: string[]
+  }> = []
+
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    const row = rows.nth(rowIndex)
+    if (!await row.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const cells = row.locator("td")
+    if (await cells.count().catch(() => 0) < 2) {
+      continue
+    }
+
+    const sizeLabel = normalizeFeedbackText(await cells.first().innerText().catch(() => ""))
+    if (!sizeLabel) {
+      continue
+    }
+
+    const fallbackValues = deriveBraSizeChartFallbackValues(sizeLabel)
+    if (!fallbackValues) {
+      continue
+    }
+
+    const inputCandidates = row.locator("input")
+    const inputCount = Math.min(await inputCandidates.count().catch(() => 0), 6)
+    const editableInputs: Locator[] = []
+    for (let inputIndex = 0; inputIndex < inputCount; inputIndex += 1) {
+      const input = inputCandidates.nth(inputIndex)
+      if (!await input.isVisible().catch(() => false)) {
+        continue
+      }
+
+      const inputType = await input.evaluate((element) => (element as HTMLInputElement).type || "").catch(() => "")
+      if (["checkbox", "radio", "search", "hidden", "button", "submit", "file"].includes(inputType.toLowerCase())) {
+        continue
+      }
+
+      editableInputs.push(input)
+    }
+
+    if (editableInputs.length === 0) {
+      continue
+    }
+
+    const appliedValues: string[] = []
+    for (let inputIndex = 0; inputIndex < Math.min(editableInputs.length, fallbackValues.length); inputIndex += 1) {
+      const input = editableInputs[inputIndex]
+      const currentValue = await readFieldValue(input).catch(() => "")
+      if (currentValue.trim()) {
+        appliedValues.push(currentValue.trim())
+        continue
+      }
+
+      const nextValue = fallbackValues[inputIndex] ?? fallbackValues.at(-1) ?? ""
+      if (!nextValue) {
+        continue
+      }
+
+      await fillTextField(input, nextValue)
+      const actualValue = await readFieldValue(input).catch(() => "")
+      if (actualValue.trim()) {
+        filledInputs += 1
+        appliedValues.push(actualValue.trim())
+      }
+    }
+
+    if (appliedValues.length > 0) {
+      filledRows.push({
+        sizeLabel,
+        values: appliedValues
+      })
+    }
+  }
+
+  return {
+    applied: filledInputs > 0,
+    reason: filledInputs > 0
+      ? `Filled ${filledInputs} blank metric inputs from bra-size defaults`
+      : "No compatible blank metric inputs were filled",
+    category,
+    filledInputs,
+    templateNameApplied: null,
+    rows: filledRows
+  }
+}
+
+const buildSizeChartTemplateHints = (
+  triggerText: string,
+  templateName: string,
+  sizeCategoryText: string
+) => {
+  const rawHints = [
+    triggerText,
+    templateName,
+    sizeCategoryText,
+    `${triggerText}${SIZE_CHART_TEMPLATE_SUFFIX}`,
+    `${templateName}${SIZE_CHART_TEMPLATE_SUFFIX}`,
+    `${sizeCategoryText}${SIZE_CHART_TEMPLATE_SUFFIX}`,
+    "\u8fde\u8863\u88d9",
+    "\u5973\u8fde\u8863\u88d9",
+    "\u88d9",
+    SIZE_CHART_TEMPLATE_SUFFIX
+  ]
+
+  return Array.from(new Set(rawHints
+    .map((value) => value.trim())
+    .filter((value) =>
+      value.length > 0
+      && !value.includes(SELECT_PLACEHOLDER_TEXT)
+      && value !== "\u6dfb\u52a0\u5c3a\u7801\u8868"
+      && value !== "\u65b0\u589e\u5c3a\u7801\u8868"
+      && value !== "\u5c3a\u7801\u8868"
+      && value !== "\u5c3a\u7801\u88682"
+    )))
+}
+
+const findSizeChartModal = async (page: Page) => {
+  const dialogs = await visibleAntModalLocators(page)
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const dialog = dialogs[index]
+    const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+    if (text.includes("\u5c3a\u7801\u8868")) {
+      return {
+        dialog,
+        text
+      }
+    }
+  }
+
+  return null
+}
+
+const normalizeSizeChart = async (page: Page) => {
+  const openDialogCount = (await visibleAntModalLocators(page)).length
+  const existingModal = await findSizeChartModal(page)
+  const baselineDialogCount = existingModal ? Math.max(0, openDialogCount - 1) : openDialogCount
+  let openedByTrigger = false
+  let triggerText = ""
+  let modalRecord = existingModal
+
+  if (!modalRecord) {
+    const trigger = await firstVisible([
+      page.locator(".skuAttrSizeChart .link"),
+      page.locator(".ant-form-item").filter({ hasText: /\u5c3a\u7801\u8868/ }).locator(".link"),
+      page.getByText("\u6dfb\u52a0\u5c3a\u7801\u8868", { exact: false }),
+      page.getByText("\u65b0\u589e\u5c3a\u7801\u8868", { exact: false })
+    ])
+
+    if (!trigger) {
+      return stepResult(
+        "normalize-size-chart",
+        "Normalize size chart",
+        "skipped",
+        "No size chart trigger is visible on the current Dianxiaomi page"
+      )
+    }
+
+    triggerText = await readVisibleText(trigger)
+    await trigger.scrollIntoViewIfNeeded()
+    await trigger.click()
+    openedByTrigger = true
+    await page.waitForTimeout(800)
+    modalRecord = await findSizeChartModal(page)
+  }
+
+  if (!modalRecord) {
+    return stepResult(
+      "normalize-size-chart",
+      "Normalize size chart",
+      "failed",
+      "Clicked the size chart trigger but no size chart modal became visible",
+      {
+        openedByTrigger,
+        triggerText
+      }
+    )
+  }
+
+  const modal = modalRecord.dialog
+  const closeModalSafely = async () => {
+    const closeButton = await firstVisible([
+      modal.locator(".ant-modal-close"),
+      modal.locator("[aria-label*='close' i]"),
+      modal.locator("[title*='close' i]")
+    ]) ?? await findInteractiveInRootByKeywords(modal, [
+      "\u5173\u95ed",
+      "\u53d6\u6d88",
+      "\u77e5\u9053\u4e86",
+      "\u786e\u5b9a",
+      "\u786e\u8ba4",
+      "close",
+      "cancel",
+      "ok"
+    ])
+
+    if (!closeButton) {
+      return false
+    }
+
+    await clickAfterDianxiaomiIdle(page, closeButton, 1)
+    return waitForVisibleAntModalCountAtMost(page, baselineDialogCount)
+  }
+
+  const templateNameField = modal.locator("input[placeholder*='\u6a21\u677f\u540d\u79f0']").first()
+  let templateName = await templateNameField.inputValue().catch(() => "")
+  const sizeCategoryText = await readVisibleText(modal.locator(".ant-select").first())
+  const metricStateBefore = await inspectSizeChartMetricState(modal)
+  const templateHints = buildSizeChartTemplateHints(triggerText, templateName, sizeCategoryText)
+  let selectedTemplate: string | null = null
+  let syncedTemplate = false
+
+  if (metricStateBefore.filledMetricInputs === 0) {
+    const selects = modal.locator(".ant-select")
+    if (await selects.count().catch(() => 0) >= 2) {
+      selectedTemplate = await selectAntOption(page, selects.nth(1), templateHints)
+      if (selectedTemplate) {
+        const syncButton = await findInteractiveInRootByKeywords(modal, ["\u540c\u6b65", "sync"])
+        if (syncButton && await syncButton.isVisible().catch(() => false)) {
+          await syncButton.click()
+          syncedTemplate = true
+          await page.waitForTimeout(800)
+        }
+      }
+    }
+  }
+
+  const metricStateAfterTemplate = await inspectSizeChartMetricState(modal)
+  const manualFillResult = metricStateAfterTemplate.filledMetricInputs === 0 && !selectedTemplate
+    ? await applyManualSizeChartFallback(modal, sizeCategoryText)
+    : null
+  if (
+    manualFillResult?.applied
+    && !templateName.trim()
+    && await templateNameField.isVisible().catch(() => false)
+  ) {
+    const generatedTemplateName = buildSizeChartTemplateName(sizeCategoryText, manualFillResult.rows)
+    if (generatedTemplateName) {
+      await fillTextField(templateNameField, generatedTemplateName)
+      templateName = await templateNameField.inputValue().catch(() => generatedTemplateName)
+      manualFillResult.templateNameApplied = templateName.trim() || generatedTemplateName
+    }
+  }
+  const metricStateAfterFallback = manualFillResult?.applied
+    ? await inspectSizeChartMetricState(modal)
+    : metricStateAfterTemplate
+  if (metricStateAfterFallback.filledMetricInputs === 0 && !selectedTemplate) {
+    const closed = await closeModalSafely().catch(() => false)
+    return stepResult(
+      "normalize-size-chart",
+      "Normalize size chart",
+      closed ? "skipped" : "failed",
+      closed
+        ? "Size chart modal was closed because no reusable template could be selected"
+        : "Size chart modal is open but has no filled metric values and no reusable template could be selected",
+      {
+        openedByTrigger,
+        triggerText,
+        templateName,
+        sizeCategoryText,
+        templateHints,
+        metricStateBefore,
+        metricStateAfterTemplate,
+        metricStateAfterFallback,
+        manualFillResult
+      }
+    )
+  }
+
+  const confirmButton = await findInteractiveInRootByKeywords(modal, ["\u786e\u5b9a", "\u786e\u8ba4", "ok", "confirm"])
+  if (!confirmButton) {
+    const closed = await closeModalSafely().catch(() => false)
+    return stepResult(
+      "normalize-size-chart",
+      "Normalize size chart",
+      closed ? "skipped" : "failed",
+      closed
+        ? "Size chart modal was closed because no visible confirm button was found"
+        : "Size chart modal does not expose a visible confirm button",
+      {
+        openedByTrigger,
+        triggerText,
+        templateName,
+        sizeCategoryText,
+        templateHints,
+        selectedTemplate,
+        syncedTemplate,
+        metricStateBefore,
+        metricStateAfterTemplate,
+        metricStateAfterFallback,
+        manualFillResult
+      }
+    )
+  }
+
+  await clickAfterDianxiaomiIdle(page, confirmButton, 1)
+  const closed = await waitForVisibleAntModalCountAtMost(page, baselineDialogCount)
+  if (!closed) {
+    await closeModalSafely().catch(() => {})
+    const latestModal = await findSizeChartModal(page)
+    return stepResult(
+      "normalize-size-chart",
+      "Normalize size chart",
+      "skipped",
+      "Size chart modal was closed after confirmation fallback",
+      {
+        openedByTrigger,
+        triggerText,
+        templateName,
+        sizeCategoryText,
+        templateHints,
+        selectedTemplate,
+        syncedTemplate,
+        metricStateBefore,
+        metricStateAfterTemplate,
+        metricStateAfterFallback,
+        manualFillResult,
+        latestDialogText: latestModal?.text ?? null
+      }
+    )
+  }
+
+  return stepResult(
+    "normalize-size-chart",
+    "Normalize size chart",
+    "done",
+    selectedTemplate
+      ? `Applied size chart template ${selectedTemplate} and confirmed the modal`
+      : manualFillResult?.applied
+        ? `Confirmed the size chart modal after ${manualFillResult.reason.toLowerCase()}`
+        : "Confirmed the existing size chart modal",
+    {
+      openedByTrigger,
+      triggerText,
+      templateName,
+      sizeCategoryText,
+      templateHints,
+      selectedTemplate,
+      syncedTemplate,
+      metricStateBefore,
+      metricStateAfterTemplate,
+      metricStateAfterFallback,
+      manualFillResult
+    }
+  )
+}
+
 export const fillSingleField = async (page: Page, kind: FieldKind, value: string, config?: DianxiaomiSelectorConfig) => {
+  if ((kind as FieldKind) === "title") {
+    return fillTitleFields(page, value, config)
+  }
+
   const field = await findField(page, kind, config)
   if (!field) {
     console.warn(`未找到字段：${kind}`)
@@ -475,17 +2593,262 @@ export const fillSingleField = async (page: Page, kind: FieldKind, value: string
 
   await fillTextField(field, value)
   console.log(`已填写字段：${kind}`)
+
+  // P0-E: write-then-read hard verification for the title field only. This is
+  // the most failure-prone single-line write on a Dianxiaomi edit page, and
+  // a silent "fill returned but DOM was not updated" was the most common
+  // path to a bad product going downstream.
+  if (kind === "title") {
+    const actualValue = await readFieldValue(field).catch(() => "")
+    const expected = value.trim()
+    if (expected.length > 0 && !titleValuesMatch(actualValue, expected)) {
+      return stepResult(
+        "write-verify-failed-title",
+        "填写 title (验证失败)",
+        "failed",
+        `Title was filled but the DOM value does not match the expected text (expected length=${expected.length}, actual length=${actualValue.length})`,
+        {
+          expectedLength: expected.length,
+          actualLength: actualValue.length,
+          actualPreview: actualValue.slice(0, 80)
+        }
+      )
+    }
+  }
+
   return stepResult(`fill-${kind}`, `填写 ${kind}`, "done", `已填写字段：${kind}`)
 }
 
+// P0-E: read a Playwright Locator's value (input / textarea) or innerText
+// (contenteditable) and return a trimmed, comparable string. Returns empty
+// string on any error so the caller can treat "could not read" as a non-match.
+const readFieldValue = async (field: Locator): Promise<string> => {
+  const tag = await field.evaluate((element) => element.tagName.toLowerCase()).catch(() => "")
+  if (tag === "input" || tag === "textarea") {
+    return (await field.inputValue().catch(() => "")).trim()
+  }
+  return (await field.innerText().catch(() => "")).trim()
+}
+
+// P0-E: lenient match for the post-fill title. Tolerates trim differences
+// and a small char-level drift (Dianxiaomi editors sometimes silently strip
+// a few ASCII noise characters), but still catches an obviously wrong value.
+const titleValuesMatch = (actual: string, expected: string): boolean => {
+  if (!actual || !expected) {
+    return false
+  }
+  if (actual === expected) {
+    return true
+  }
+  const minLen = Math.min(actual.length, expected.length)
+  if (minLen < expected.length * 0.5) {
+    return false
+  }
+  let matched = 0
+  for (let index = 0; index < minLen; index += 1) {
+    if (actual[index] === expected[index]) {
+      matched += 1
+    }
+  }
+  return matched / expected.length >= 0.9
+}
+
+const CJK_TEXT_PATTERN = /[\u3400-\u9fff\uf900-\ufaff]/
+
+const TITLE_FIELD_KEYWORD_GROUPS = [
+  ["\u4ea7\u54c1\u6807\u9898"],
+  ["\u5546\u54c1\u6807\u9898"],
+  ["\u82f1\u6587\u6807\u9898"],
+  ["\u520a\u767b\u6807\u9898"],
+  ["\u5e73\u53f0\u6807\u9898"],
+  ["product title"],
+  ["english title"],
+  ["listing title"],
+  ["title"]
+]
+
+const findTitleFieldByFormItemLabel = async (page: Page, label: string) => {
+  const formItems = page.locator(".ant-form-item").filter({
+    has: page.locator(".ant-form-item-label").filter({
+      hasText: new RegExp(escapeRegExp(label), "i")
+    })
+  })
+  const count = Math.min(await formItems.count().catch(() => 0), 4)
+  for (let index = 0; index < count; index += 1) {
+    const item = formItems.nth(index)
+    const field = await firstVisible([
+      item.locator("input:not([type='hidden']):not([disabled]), textarea:not([disabled]), [contenteditable='true']")
+    ])
+    if (field && await isWritableField(field)) {
+      return field
+    }
+  }
+
+  return null
+}
+
+const locatorFingerprint = async (locator: Locator) => {
+  const box = await locator.boundingBox().catch(() => null)
+  if (box) {
+    return `${Math.round(box.x)}:${Math.round(box.y)}:${Math.round(box.width)}:${Math.round(box.height)}`
+  }
+
+  return locator.evaluate((element) => {
+    const tag = element.tagName.toLowerCase()
+    const id = element.getAttribute("id") ?? ""
+    const name = element.getAttribute("name") ?? ""
+    const placeholder = element.getAttribute("placeholder") ?? ""
+    return `${tag}:${id}:${name}:${placeholder}`
+  }).catch(() => "")
+}
+
+const findTitleFields = async (page: Page, config?: DianxiaomiSelectorConfig) => {
+  const fields: Locator[] = []
+  const seen = new Set<string>()
+  const addField = async (field: Locator | null) => {
+    if (!field || !await field.isVisible().catch(() => false) || !await isWritableField(field)) {
+      return
+    }
+    const key = await locatorFingerprint(field)
+    if (!key || seen.has(key)) {
+      return
+    }
+    seen.add(key)
+    fields.push(field)
+  }
+
+  await addField(await findByConfiguredSelectors(page, config?.fields?.title))
+  await addField(await findTitleFieldByFormItemLabel(page, "\u82f1\u6587\u6807\u9898"))
+  await addField(await findTitleFieldByFormItemLabel(page, "\u4ea7\u54c1\u6807\u9898"))
+  await addField(await findTitleFieldByFormItemLabel(page, "\u5546\u54c1\u6807\u9898"))
+  for (const keywords of TITLE_FIELD_KEYWORD_GROUPS) {
+    await addField(await findFieldByKeyword(page, keywords))
+  }
+  const broadTitleCandidates = page.locator("input.ant-input.ant-input-sm[maxlength='250']")
+  const broadCount = Math.min(await broadTitleCandidates.count().catch(() => 0), 8)
+  for (let index = 0; index < broadCount; index += 1) {
+    await addField(broadTitleCandidates.nth(index))
+  }
+
+  return fields
+}
+
+const fillTitleFields = async (page: Page, value: string, config?: DianxiaomiSelectorConfig) => {
+  const fields = await findTitleFields(page, config)
+  if (fields.length === 0) {
+    console.warn("鏈壘鍒板瓧娈碉細title")
+    return stepResult("fill-title", "濉啓 title", "failed", "鏈壘鍒板瓧娈碉細title")
+  }
+
+  const expected = value.trim()
+  const previews: string[] = []
+  let mismatchCount = 0
+  for (const field of fields) {
+    await fillTextField(field, value)
+    const actualValue = await readFieldValue(field).catch(() => "")
+    previews.push(actualValue.slice(0, 80))
+    if (expected.length > 0 && !titleValuesMatch(actualValue, expected)) {
+      mismatchCount += 1
+    }
+  }
+
+  if (mismatchCount > 0) {
+    return stepResult(
+      "write-verify-failed-title",
+      "濉啓 title (楠岃瘉澶辫触)",
+      "failed",
+      `Title was filled but ${mismatchCount}/${fields.length} DOM value(s) did not match the expected text`,
+      {
+        expectedLength: expected.length,
+        filledTitleFields: fields.length,
+        mismatchCount,
+        actualPreviews: previews
+      }
+    )
+  }
+
+  console.log(`宸插～鍐欏瓧娈碉細title (${fields.length})`)
+  return stepResult(
+    "fill-title",
+    "濉啓 title",
+    "done",
+    `宸插～鍐欏瓧娈碉細title (${fields.length})`,
+    {
+      filledTitleFields: fields.length,
+      actualPreviews: previews
+    }
+  )
+}
+
+const fillEnglishTitleField = async (page: Page, value: string, config?: DianxiaomiSelectorConfig) => {
+  const field = await findTitleFieldByFormItemLabel(page, "\u82f1\u6587\u6807\u9898")
+    ?? await findFieldByKeyword(page, ["english title"])
+
+  if (!field) {
+    return fillSingleField(page, "title", value, config)
+  }
+
+  await fillTextField(field, value)
+  const actualValue = await readFieldValue(field).catch(() => "")
+  const expected = value.trim()
+  if (expected.length > 0 && !titleValuesMatch(actualValue, expected)) {
+    return stepResult(
+      "write-verify-failed-english-title",
+      "Fill english title (verification failed)",
+      "failed",
+      "English title was filled but the DOM value does not match the expected text",
+      {
+        expectedLength: expected.length,
+        actualLength: actualValue.length,
+        actualPreview: actualValue.slice(0, 80)
+      }
+    )
+  }
+
+  return stepResult(
+    "fill-english-title",
+    "Fill english title",
+    "done",
+    "English title field was updated from the task draft",
+    {
+      actualPreview: actualValue.slice(0, 80)
+    }
+  )
+}
+
+const isWritableField = async (field: Locator | null) => {
+  if (!field) {
+    return false
+  }
+
+  return field.evaluate((element) => {
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      return !element.readOnly && !element.disabled
+    }
+    if (element instanceof HTMLSelectElement) {
+      return !element.disabled
+    }
+    return element.getAttribute("contenteditable") === "true"
+  }).catch(() => false)
+}
+
 export const findSkuRows = async (page: Page, config?: DianxiaomiSelectorConfig) => {
+  const skuRowFieldSelector = [
+    'input[name*="variationSku" i]',
+    'input[name*="price" i]',
+    'input[name*="stock" i]',
+    'input[placeholder*="价格" i]',
+    'input[placeholder*="库存" i]',
+    'input[aria-label*="价格" i]',
+    'input[aria-label*="库存" i]'
+  ].join(", ")
   const configuredRow = config?.skuRows?.length
     ? page.locator(config.skuRows.join(", ")).filter({
-        has: page.locator(EDITABLE_SELECTOR)
+        has: page.locator(skuRowFieldSelector)
       })
     : null
-  const rowCandidates = page.locator("tr, [role='row'], [class*='sku' i], [class*='table-row' i], [class*='row' i]").filter({
-    has: page.locator(EDITABLE_SELECTOR)
+  const rowCandidates = page.locator("tr, [role='row'], [class*='sku' i], [class*='table-row' i]").filter({
+    has: page.locator(skuRowFieldSelector)
   })
 
   const rows: Array<{ row: Locator; text: string }> = []
@@ -494,7 +2857,7 @@ export const findSkuRows = async (page: Page, config?: DianxiaomiSelectorConfig)
   for (let index = 0; index < count; index += 1) {
     const row = candidates.nth(index)
     const text = normalizeText(await row.innerText().catch(() => ""))
-    const inputs = await row.locator(EDITABLE_SELECTOR).count()
+    const inputs = await row.locator(skuRowFieldSelector).count()
 
     if (inputs > 0) {
       rows.push({
@@ -515,7 +2878,7 @@ const scoreSkuRow = (rowText: string, sku: ListingSkuPricing) => {
   return tokens.reduce((score, token) => score + (rowText.includes(token) ? Math.max(token.length, 1) : 0), 0)
 }
 
-const getRowField = async (row: Locator, kind: "price" | "stock", fallbackIndex: number) => {
+const getRowField = async (row: Locator, kind: "price" | "stock", _fallbackIndex: number) => {
   const keywords = getFieldKeywords(kind)
   const byHint = row.locator(
     keywords
@@ -531,16 +2894,1102 @@ const getRowField = async (row: Locator, kind: "price" | "stock", fallbackIndex:
   )
 
   const hinted = await firstVisible([byHint])
-  if (hinted) {
+  if (hinted && await isWritableField(hinted)) {
     return hinted
   }
 
-  const inputs = row.locator(EDITABLE_SELECTOR)
-  if ((await inputs.count()) > fallbackIndex) {
-    return inputs.nth(fallbackIndex)
+  return null
+}
+
+const SKU_IDENTIFIER_SELECTOR = [
+  'input[name*="variationSku" i]',
+  'input[name*="skuAttrCode" i]',
+  'input[class*="skuAttrCode" i]',
+  'input[placeholder*="\u4e0d\u80fd\u5305\u542b\u4e2d\u6587" i]',
+  'input[aria-label*="\u8d27\u53f7" i]',
+  'input[placeholder*="\u8d27\u53f7" i]'
+].join(", ")
+
+const getRowSkuIdentifierField = async (row: Locator) => {
+  const field = await firstVisible([row.locator(SKU_IDENTIFIER_SELECTOR)])
+  if (field && await isWritableField(field)) {
+    return field
+  }
+  return null
+}
+
+const fillVisibleSkuIdentifierFields = async (page: Page, skus: ListingSkuPricing[]) => {
+  const fields = page.locator(SKU_IDENTIFIER_SELECTOR)
+  const count = Math.min(await fields.count().catch(() => 0), 160)
+  const usedCodes = new Set<string>()
+  let filledSkuCodes = 0
+  let skuCodeVerified = 0
+  const skuCodeSamples: string[] = []
+
+  for (let index = 0; index < count; index += 1) {
+    const field = fields.nth(index)
+    if (!await field.isVisible().catch(() => false) || !await isWritableField(field)) {
+      continue
+    }
+
+    const currentSkuCode = await readFieldValue(field).catch(() => "")
+    if (currentSkuCode.trim() && !CJK_TEXT_PATTERN.test(currentSkuCode)) {
+      usedCodes.add(currentSkuCode.trim().toUpperCase())
+      skuCodeSamples.push(currentSkuCode.slice(0, 40))
+      continue
+    }
+
+    const sku = skus[index] ?? skus[skus.length - 1]
+    if (!sku) {
+      continue
+    }
+    const nextSkuCode = skuIdentifierCode(sku, index, usedCodes)
+    await fillTextField(field, nextSkuCode)
+    filledSkuCodes += 1
+    const actualSkuCode = await readFieldValue(field).catch(() => "")
+    if (actualSkuCode === nextSkuCode) {
+      skuCodeVerified += 1
+    }
+    skuCodeSamples.push(actualSkuCode.slice(0, 40))
+  }
+
+  return {
+    visibleSkuCodeFields: count,
+    filledSkuCodes,
+    skuCodeVerified,
+    skuCodeSamples: skuCodeSamples.slice(0, 12)
+  }
+}
+
+const chooseDominantVisibleInputValue = async (
+  page: Page,
+  fieldName: string,
+  fallback: string
+) => {
+  const fields = page.locator(`input[name="${fieldName}"]`)
+  const count = Math.min(await fields.count().catch(() => 0), 240)
+  const valueStats = new Map<string, { count: number; firstIndex: number }>()
+
+  for (let index = 0; index < count; index += 1) {
+    const field = fields.nth(index)
+    if (!await field.isVisible().catch(() => false) || !await isWritableField(field)) {
+      continue
+    }
+
+    const currentValue = await readFieldValue(field).catch(() => "")
+    if (!currentValue.trim()) {
+      continue
+    }
+
+    const existing = valueStats.get(currentValue)
+    if (existing) {
+      existing.count += 1
+    } else {
+      valueStats.set(currentValue, {
+        count: 1,
+        firstIndex: index
+      })
+    }
+  }
+
+  const winner = [...valueStats.entries()]
+    .sort((left, right) => {
+      const countDelta = right[1].count - left[1].count
+      return countDelta !== 0 ? countDelta : left[1].firstIndex - right[1].firstIndex
+    })[0]?.[0]
+
+  return winner?.trim() || fallback
+}
+
+const fillVisibleNamedInputBlanks = async (
+  page: Page,
+  fieldName: string,
+  fallbackValue: string
+) => {
+  const fields = page.locator(`input[name="${fieldName}"]`)
+  const count = Math.min(await fields.count().catch(() => 0), 240)
+  const appliedValue = await chooseDominantVisibleInputValue(page, fieldName, fallbackValue)
+  let visibleFields = 0
+  let blankFields = 0
+  let filledFields = 0
+  let verifiedFields = 0
+  const sampleValues: string[] = []
+
+  for (let index = 0; index < count; index += 1) {
+    const field = fields.nth(index)
+    if (!await field.isVisible().catch(() => false) || !await isWritableField(field)) {
+      continue
+    }
+
+    visibleFields += 1
+    const currentValue = await readFieldValue(field).catch(() => "")
+    if (currentValue.trim()) {
+      sampleValues.push(currentValue.slice(0, 32))
+      continue
+    }
+
+    blankFields += 1
+    await fillTextField(field, appliedValue)
+    const actualValue = await readFieldValue(field).catch(() => "")
+    sampleValues.push(actualValue.slice(0, 32))
+    if (actualValue.trim()) {
+      filledFields += 1
+      if (actualValue === appliedValue) {
+        verifiedFields += 1
+      }
+    }
+  }
+
+  return {
+    fieldName,
+    visibleFields,
+    blankFields,
+    filledFields,
+    verifiedFields,
+    appliedValue,
+    sampleValues: sampleValues.slice(0, 12)
+  }
+}
+
+const fillVisibleSkuLogisticsFields = async (page: Page) => {
+  const fieldPlans = [
+    {
+      fieldName: "price",
+      label: "declared price",
+      fallbackValue: REPAIR_DECLARED_PRICE_FALLBACK
+    },
+    {
+      fieldName: "skuLength",
+      label: "sku length",
+      fallbackValue: REPAIR_SKU_LENGTH_FALLBACK
+    },
+    {
+      fieldName: "skuWidth",
+      label: "sku width",
+      fallbackValue: REPAIR_SKU_WIDTH_FALLBACK
+    },
+    {
+      fieldName: "skuHeight",
+      label: "sku height",
+      fallbackValue: REPAIR_SKU_HEIGHT_FALLBACK
+    },
+    {
+      fieldName: "weight",
+      label: "sku weight",
+      fallbackValue: REPAIR_SKU_WEIGHT_G_FALLBACK
+    }
+  ] as const
+
+  const summaries = []
+  for (const plan of fieldPlans) {
+    summaries.push({
+      label: plan.label,
+      ...await fillVisibleNamedInputBlanks(page, plan.fieldName, plan.fallbackValue)
+    })
+  }
+
+  const visibleFieldGroups = summaries.filter((item) => item.visibleFields > 0).length
+  const filledBlankGroups = summaries.filter((item) => item.filledFields > 0).length
+  const remainingBlankGroups = summaries.filter((item) => item.blankFields > item.filledFields).length
+  const totalBlanks = summaries.reduce((total, item) => total + item.blankFields, 0)
+  const totalFilled = summaries.reduce((total, item) => total + item.filledFields, 0)
+
+  return stepResult(
+    "fill-sku-logistics-fields",
+    "Fill SKU logistics fields",
+    remainingBlankGroups > 0
+      ? "failed"
+      : visibleFieldGroups > 0
+        ? "done"
+        : "skipped",
+    remainingBlankGroups > 0
+      ? `Filled ${totalFilled}/${totalBlanks} blank SKU logistics field(s)`
+      : visibleFieldGroups > 0
+        ? totalBlanks > 0
+          ? `Filled ${totalFilled} blank SKU logistics field(s)`
+          : "Visible SKU logistics fields were already complete"
+        : "No visible SKU logistics field was detected before page save",
+    {
+      visibleFieldGroups,
+      filledBlankGroups,
+      remainingBlankGroups,
+      totalBlanks,
+      totalFilled,
+      fields: summaries
+    }
+  )
+}
+
+const collectColorSkcGroupState = async (page: Page, includeVariantRows = false) => {
+  const rows = page.locator(COLOR_SKC_ROW_SELECTOR)
+  const count = Math.min(await rows.count().catch(() => 0), 160)
+  const groups: Array<{
+    index: number
+    label: string
+  }> = []
+
+  for (let index = 0; index < count; index += 1) {
+    const row = rows.nth(index)
+    if (!await row.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const label = cleanVisibleText(
+      await row.locator("td[data-column-index='0']").first().innerText().catch(async () =>
+        row.locator("td").first().innerText().catch(() => "")
+      )
+    )
+    if (!label) {
+      continue
+    }
+
+    groups.push({
+      index: groups.length,
+      label
+    })
+  }
+
+  return {
+    groupCount: groups.length,
+    groups,
+    variantRowCount: includeVariantRows ? (await findSkuRows(page)).length : 0
+  }
+}
+
+const findVisibleSelectedColorOptionLabelByTableOrder = async (
+  colorSection: Locator,
+  rowIndex: number,
+  normalizedTarget = ""
+) => {
+  if (rowIndex < 0) {
+    return null
+  }
+
+  const labels = colorSection.locator("label.d-checkbox.mr-8")
+  const optionIndex = await labels.evaluateAll((nodes, input) => {
+    const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim().toLowerCase()
+    const matchesTarget = (value: string) =>
+      Boolean(input.target)
+      && (value === input.target || value.endsWith(input.target) || value.includes(input.target))
+    const visibleOptions = nodes
+      .map((node, index) => {
+        const element = node as HTMLElement
+        const style = window.getComputedStyle(element)
+        const rect = element.getBoundingClientRect()
+        const textNode = element.querySelector(".theme-value-text, .theme-value-edit")
+        return {
+          index,
+          text: normalize(element.innerText || element.textContent),
+          title: normalize(textNode?.getAttribute("title") ?? textNode?.textContent ?? ""),
+          visible: style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+        }
+      })
+      .filter((item) => item.visible && (item.text || item.title))
+
+    return visibleOptions.find((item) => matchesTarget(item.text) || matchesTarget(item.title))?.index
+      ?? visibleOptions[input.rowIndex]?.index
+      ?? -1
+  }, {
+    rowIndex,
+    target: normalizedTarget
+  }).catch(() => -1)
+
+  return optionIndex >= 0 ? labels.nth(optionIndex) : null
+}
+
+const findVisibleColorOptionLabelInRoot = async (
+  root: Page | Locator,
+  selector: string,
+  normalizedTarget: string,
+  visibleOnly: boolean
+) => {
+  const options = root.locator(selector)
+  const optionIndex = await options.evaluateAll((nodes, target) => {
+    const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim().toLowerCase()
+    const visibleOptions = nodes
+      .map((node, index) => {
+        const element = node as HTMLElement
+        const style = window.getComputedStyle(element)
+        const rect = element.getBoundingClientRect()
+        const title = normalize(element.getAttribute("title"))
+        return {
+          index,
+          text: normalize(element.innerText || element.textContent || element.getAttribute("title")),
+          title,
+          visible: style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+        }
+      })
+      .filter((item) => target.visibleOnly ? item.visible : true)
+
+    return visibleOptions.find((item) => item.text === target.label || item.title === target.label)?.index
+      ?? visibleOptions.find((item) => item.text.endsWith(target.label) || item.title.endsWith(target.label))?.index
+      ?? visibleOptions.find((item) => item.text.includes(target.label) || item.title.includes(target.label))?.index
+      ?? -1
+  }, {
+    label: normalizedTarget,
+    visibleOnly
+  }).catch(() => -1)
+
+  return optionIndex >= 0 ? options.nth(optionIndex) : null
+}
+
+const findVisibleColorOptionLabel = async (
+  page: Page,
+  colorSection: Locator,
+  labelText: string
+) => {
+  const normalizedTarget = normalizeText(labelText)
+
+  for (const visibleOnly of [true, false]) {
+    for (const root of [colorSection, page] as const) {
+      for (const selector of COLOR_SKC_OPTION_SELECTORS) {
+        const match = await findVisibleColorOptionLabelInRoot(root, selector, normalizedTarget, visibleOnly)
+        if (match) {
+          return match
+        }
+      }
+    }
   }
 
   return null
+}
+
+const findColorOptionToggleTarget = async (
+  page: Page,
+  colorSection: Locator,
+  labelText: string,
+  rowIndex = -1
+) => {
+  const normalizedTarget = normalizeText(labelText)
+  const orderedMatch = await findVisibleSelectedColorOptionLabelByTableOrder(colorSection, rowIndex, normalizedTarget)
+  if (orderedMatch) {
+    return orderedMatch
+  }
+
+  return findVisibleColorOptionLabel(page, colorSection, labelText)
+}
+
+const waitForVisibleColorOptionLabel = async (
+  page: Page,
+  colorSection: Locator,
+  labelText: string,
+  rowIndex = -1,
+  timeoutMs = COLOR_SKC_OPTION_WAIT_TIMEOUT_MS
+) => {
+  const startedAt = Date.now()
+  let match = await findColorOptionToggleTarget(page, colorSection, labelText, rowIndex)
+  while (!match && Date.now() - startedAt < timeoutMs) {
+    await page.waitForTimeout(300)
+    match = await findColorOptionToggleTarget(page, colorSection, labelText, rowIndex)
+  }
+
+  return match
+}
+
+const revealColorOptionTargets = async (
+  page: Page,
+  colorSection: Locator,
+  targetLabels: string[],
+  timeoutMs = COLOR_SKC_OPTION_REVEAL_TIMEOUT_MS
+) => {
+  const normalizedTargets = targetLabels.map((label) => normalizeText(label)).filter(Boolean)
+  if (normalizedTargets.length === 0) {
+    return false
+  }
+
+  const startedAt = Date.now()
+  const firstColorRow = page.locator(COLOR_SKC_ROW_SELECTOR).first()
+
+  while (Date.now() - startedAt < timeoutMs) {
+    for (const labelText of targetLabels) {
+      if (await findVisibleColorOptionLabel(page, colorSection, labelText)) {
+        return true
+      }
+    }
+
+    await colorSection.scrollIntoViewIfNeeded().catch(() => undefined)
+    await firstColorRow.scrollIntoViewIfNeeded().catch(() => undefined)
+    await page.evaluate(({ sectionSelector, rowSelector, targets }) => {
+      const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim().toLowerCase()
+      const section = document.querySelector(sectionSelector)
+      if (!(section instanceof HTMLElement)) {
+        return false
+      }
+
+      const matchText = (text: string) => targets.some((target) => text === target || text.endsWith(target) || text.includes(target))
+      const visibleElement = (node: Element | null): node is HTMLElement => {
+        if (!(node instanceof HTMLElement)) {
+          return false
+        }
+
+        const style = window.getComputedStyle(node)
+        const rect = node.getBoundingClientRect()
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+      }
+
+      const sectionNodes = Array.from(section.querySelectorAll("*"))
+      const matchedNode = sectionNodes.find((node) => visibleElement(node) && matchText(normalize(node.innerText || node.textContent)))
+      if (matchedNode instanceof HTMLElement) {
+        matchedNode.scrollIntoView({
+          block: "center",
+          inline: "nearest"
+        })
+        return true
+      }
+
+      const scrollContainers = Array.from(section.querySelectorAll([
+        ".checkbox-group-with-search__content",
+        ".checkbox-group-with-search",
+        ".options-module"
+      ].join(", ")))
+      for (const container of scrollContainers) {
+        if (!(container instanceof HTMLElement)) {
+          continue
+        }
+
+        const nextOffset = Math.max(Math.floor(container.clientHeight * 0.85), 240)
+        if (container.scrollHeight > container.clientHeight + 20) {
+          container.scrollTop = Math.min(container.scrollTop + nextOffset, container.scrollHeight)
+        }
+      }
+
+      const firstRow = document.querySelector(rowSelector)
+      if (firstRow instanceof HTMLElement) {
+        firstRow.scrollIntoView({
+          block: "center",
+          inline: "nearest"
+        })
+      }
+
+      window.scrollBy(0, 260)
+      return false
+    }, {
+      sectionSelector: COLOR_SKC_SECTION_SELECTOR,
+      rowSelector: COLOR_SKC_ROW_SELECTOR,
+      targets: normalizedTargets
+    }).catch(() => false)
+    await page.waitForTimeout(350)
+  }
+
+  for (const labelText of targetLabels) {
+    if (await findVisibleColorOptionLabel(page, colorSection, labelText)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+const collectColorOptionSelectorState = async (
+  root: Page | Locator,
+  selector: string,
+  targetLabels: string[]
+) => {
+  const options = root.locator(selector)
+  return options.evaluateAll((nodes, input) => {
+    const normalize = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim().toLowerCase()
+    const labels = input.labels.map(normalize)
+    const visibleOptions = nodes
+      .map((node) => {
+        const element = node as HTMLElement
+        const style = window.getComputedStyle(element)
+        const rect = element.getBoundingClientRect()
+        return {
+          text: normalize(element.innerText || element.textContent),
+          visible: style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+        }
+      })
+
+    const allTexts = visibleOptions
+      .map((item) => item.text)
+      .filter(Boolean)
+    const uniqueTexts = Array.from(new Set(allTexts))
+    const visibleMatches = uniqueTexts.filter((text) => labels.some((label) => text === label || text.endsWith(label) || text.includes(label)))
+
+    return {
+      selector: input.selector,
+      totalCount: nodes.length,
+      visibleCount: visibleOptions.filter((item) => item.visible).length,
+      sampleTexts: uniqueTexts.slice(0, 12),
+      tailTexts: uniqueTexts.slice(-12),
+      matchingTexts: visibleMatches
+    }
+  }, {
+    selector,
+    labels: targetLabels
+  }).catch(() => ({
+    selector,
+    totalCount: 0,
+    visibleCount: 0,
+    sampleTexts: [] as string[],
+    tailTexts: [] as string[],
+    matchingTexts: [] as string[]
+  }))
+}
+
+const collectColorOptionDebugSnapshot = async (
+  page: Page,
+  colorSection: Locator,
+  targetLabels: string[]
+) => {
+  const selectors = COLOR_SKC_OPTION_SELECTORS
+  const sectionVisible = await colorSection.isVisible().catch(() => false)
+
+  return {
+    sectionVisible,
+    colorSection: await Promise.all(selectors.map((selector) => collectColorOptionSelectorState(colorSection, selector, targetLabels))),
+    page: await Promise.all(selectors.map((selector) => collectColorOptionSelectorState(page, selector, targetLabels)))
+  }
+}
+
+const colorOptionSnapshotHasAnyControls = (
+  snapshot: Awaited<ReturnType<typeof collectColorOptionDebugSnapshot>> | null
+) => Boolean(snapshot && [...snapshot.colorSection, ...snapshot.page].some((item) => item.totalCount > 0))
+
+const waitForColorOptionControlsSnapshot = async (
+  page: Page,
+  colorSection: Locator,
+  targetLabels: string[],
+  timeoutMs = COLOR_SKC_OPTION_HYDRATE_TIMEOUT_MS
+) => {
+  const startedAt = Date.now()
+  let snapshot = await collectColorOptionDebugSnapshot(page, colorSection, targetLabels)
+  if (colorOptionSnapshotHasAnyControls(snapshot)) {
+    return snapshot
+  }
+
+  console.log(`Waiting for color SKC option controls to hydrate (${targetLabels.slice(0, 3).join(", ")})`)
+  while (Date.now() - startedAt < timeoutMs) {
+    await colorSection.scrollIntoViewIfNeeded().catch(() => undefined)
+    await page.waitForTimeout(500)
+    snapshot = await collectColorOptionDebugSnapshot(page, colorSection, targetLabels)
+    if (colorOptionSnapshotHasAnyControls(snapshot)) {
+      return snapshot
+    }
+  }
+
+  return snapshot
+}
+
+const findLooseActionInRootByKeywords = async (root: Page | Locator, keywords: string[]) => {
+  for (const keyword of keywords) {
+    const pattern = new RegExp(escapeRegExp(keyword), "i")
+    const match = await firstVisible([
+      root.getByRole("button", { name: pattern }),
+      root.getByRole("link", { name: pattern }),
+      root.getByRole("menuitem", { name: pattern }),
+      root.locator("button, a, [role='button'], [role='link'], [role='menuitem'], span.link, .link").filter({
+        hasText: pattern
+      })
+    ])
+
+    if (match) {
+      return match
+    }
+  }
+
+  return null
+}
+
+const clickColorSkcRemapTrigger = async (
+  page: Page,
+  colorSection: Locator,
+  reason: string
+) => {
+  const roots: Array<Page | Locator> = [
+    colorSection.locator("xpath=ancestor::*[contains(@class,'skuAttrModule') or contains(@class,'form-card')][1]"),
+    colorSection,
+    page
+  ]
+
+  for (const root of roots) {
+    const trigger = await findLooseActionInRootByKeywords(root, COLOR_SKC_REMAP_KEYWORDS)
+    if (!trigger || !await trigger.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const triggerText = cleanVisibleText(
+      await trigger.innerText().catch(async () =>
+        trigger.getAttribute("title").catch(() => "")
+      )
+    )
+    console.log(`color-skc trim: clicking remap trigger because ${reason}${triggerText ? ` (${triggerText})` : ""}`)
+    await clickAfterDianxiaomiIdle(page, trigger, 2).catch(async () => {
+      await trigger.click({
+        force: true
+      }).catch(() => undefined)
+    })
+    await page.waitForTimeout(1_200)
+    return {
+      attempted: true,
+      clicked: true,
+      reason,
+      text: triggerText
+    }
+  }
+
+  console.log(`color-skc trim: remap trigger missing (${reason})`)
+  return {
+    attempted: true,
+    clicked: false,
+    reason,
+    text: ""
+  }
+}
+
+const waitForColorSkcReduction = async (
+  page: Page,
+  beforeState: Awaited<ReturnType<typeof collectColorSkcGroupState>>,
+  labelText: string,
+  timeoutMs = COLOR_SKC_RECALC_TIMEOUT_MS
+) => {
+  const deadline = Date.now() + timeoutMs
+  let afterState = beforeState
+  let removedFromTable = false
+
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(300)
+    afterState = await collectColorSkcGroupState(page)
+    removedFromTable = !afterState.groups.some((group) => normalizeText(group.label) === normalizeText(labelText))
+    if (afterState.groupCount < beforeState.groupCount || removedFromTable) {
+      return {
+        reduced: true,
+        removedFromTable,
+        afterState
+      }
+    }
+  }
+
+  afterState = await collectColorSkcGroupState(page)
+  removedFromTable = !afterState.groups.some((group) => normalizeText(group.label) === normalizeText(labelText))
+  return {
+    reduced: afterState.groupCount < beforeState.groupCount || removedFromTable,
+    removedFromTable,
+    afterState
+  }
+}
+
+const refreshCurrentDianxiaomiEditPage = async (
+  page: Page,
+  reason: string
+) => {
+  const targetUrl = page.url()
+  if (!isRealDianxiaomiEditTargetUrl(targetUrl)) {
+    return false
+  }
+
+  console.log(`Refreshing current Dianxiaomi edit page before color SKC trim because ${reason}: ${targetUrl}`)
+  await page.goto(targetUrl, {
+    waitUntil: "domcontentloaded"
+  }).catch((error) => {
+    console.warn(`Refresh before color SKC trim failed: ${error instanceof Error ? error.message : String(error)}`)
+  })
+  await waitForPublishPage(page, loadSelectorConfig(".runtime/dianxiaomi-selector-config.json"), {
+    waitForManualNavigation: false,
+    targetUrl,
+    allowSameTargetRefresh: false
+  })
+  await page.waitForTimeout(1_500)
+  return true
+}
+
+const setColorOptionChecked = async (
+  page: Page,
+  option: Locator,
+  checked: boolean
+) => {
+  const checkbox = option.locator("input[type='checkbox']").first()
+  const hasCheckbox = await checkbox.count().catch(() => 0) > 0
+  await option.scrollIntoViewIfNeeded().catch(() => undefined)
+  const before = hasCheckbox ? await checkbox.isChecked().catch(() => null as boolean | null) : null
+
+  if (!checked) {
+    let clicked = false
+    await clickAfterDianxiaomiIdle(page, option, 2).then(() => {
+      clicked = true
+    }).catch(async () => {
+      clicked = await option.click({
+        force: true
+      }).then(() => true).catch(() => false)
+    })
+    await page.waitForTimeout(250)
+    const after = hasCheckbox ? await checkbox.isChecked().catch(() => before) : null
+    return {
+      found: true,
+      before,
+      after,
+      changed: before === null ? clicked : before !== after,
+      clicked
+    }
+  }
+
+  if (!hasCheckbox) {
+    return {
+      found: false,
+      before: null,
+      after: null,
+      changed: false,
+      clicked: false
+    }
+  }
+
+  if (before !== null && before !== checked) {
+    await checkbox.setChecked(checked, {
+      force: true
+    }).catch(async () => {
+      const updated = await checkbox.evaluate((node, nextChecked) => {
+        if (!(node instanceof HTMLInputElement)) {
+          return false
+        }
+
+        node.checked = nextChecked
+        node.dispatchEvent(new Event("input", {
+          bubbles: true
+        }))
+        node.dispatchEvent(new Event("change", {
+          bubbles: true
+        }))
+        return true
+      }, checked).catch(() => false)
+
+      if (!updated) {
+        await clickAfterDianxiaomiIdle(page, option, 2)
+      }
+    })
+    await page.waitForTimeout(250)
+  }
+
+  const after = await checkbox.isChecked().catch(() => before)
+  return {
+    found: true,
+    before,
+    after,
+    changed: before !== after,
+    clicked: before !== after
+  }
+}
+
+const setColorOptionCheckedByTextFallback = async (
+  page: Page,
+  labelText: string,
+  checked: boolean
+) => {
+  const colorSection = page.locator(COLOR_SKC_SECTION_SELECTOR).first()
+  const labelPattern = new RegExp(escapeRegExp(labelText), "i")
+  const selectors = Array.from(new Set([
+    ...COLOR_SKC_OPTION_SELECTORS,
+    "label",
+    ".theme-value-edit",
+    ".theme-value-text"
+  ]))
+
+  for (const root of [colorSection, page] as const) {
+    for (const selector of selectors) {
+      const candidate = await firstVisible([
+        root.locator(selector).filter({
+          hasText: labelPattern
+        })
+      ])
+      if (!candidate) {
+        continue
+      }
+
+      const candidateText = cleanVisibleText(await candidate.innerText().catch(() => ""))
+      const normalizedCandidate = normalizeText(candidateText)
+      const normalizedTarget = normalizeText(labelText)
+      if (
+        normalizedCandidate !== normalizedTarget
+        && !normalizedCandidate.endsWith(normalizedTarget)
+        && !normalizedCandidate.includes(normalizedTarget)
+      ) {
+        continue
+      }
+
+      return setColorOptionChecked(page, candidate, checked)
+    }
+  }
+
+  return {
+    found: false,
+    before: null,
+    after: null,
+    changed: false,
+    clicked: false
+  }
+}
+
+const trimColorSkcGroupsToLimit = async (
+  page: Page,
+  maxGroups = COLOR_SKC_MAX_GROUPS,
+  refreshAttemptsRemaining = 1
+) => {
+  const before = await collectColorSkcGroupState(page, true)
+  if (before.groupCount === 0) {
+    return stepResult(
+      "trim-color-skc-groups",
+      "Trim color SKC groups",
+      "skipped",
+      "No color SKC table is visible on the current Dianxiaomi page"
+    )
+  }
+
+  if (before.groupCount <= maxGroups) {
+    return stepResult(
+      "trim-color-skc-groups",
+      "Trim color SKC groups",
+      "skipped",
+      `Color SKC groups already within limit (${before.groupCount}/${maxGroups})`,
+      {
+        limit: maxGroups,
+        before
+      }
+    )
+  }
+
+  const colorSection = page.locator(COLOR_SKC_SECTION_SELECTOR).first()
+  if (!await colorSection.isVisible().catch(() => false)) {
+    return stepResult(
+      "trim-color-skc-groups",
+      "Trim color SKC groups",
+      "failed",
+      `Color SKC groups exceed the limit (${before.groupCount}/${maxGroups}) but the color selector is not visible`,
+      {
+        limit: maxGroups,
+        before
+      }
+    )
+  }
+
+  const keepLabels = before.groups.slice(0, maxGroups).map((group) => group.label)
+  const plannedRemoveLabels = before.groups.slice(maxGroups).map((group) => group.label)
+  const removedLabels: string[] = []
+  const missingLabels: string[] = []
+  const failedLabels: string[] = []
+  const labelActions: Array<Record<string, unknown>> = []
+  let optionDebugSnapshot: Awaited<ReturnType<typeof collectColorOptionDebugSnapshot>> | null = null
+  let remapAction: {
+    attempted: boolean
+    clicked: boolean
+    reason: string
+    text: string
+  } | null = null
+
+  await colorSection.scrollIntoViewIfNeeded().catch(() => undefined)
+  await page.waitForTimeout(300)
+  await revealColorOptionTargets(page, colorSection, plannedRemoveLabels)
+
+  optionDebugSnapshot = await waitForColorOptionControlsSnapshot(page, colorSection, plannedRemoveLabels)
+  if (!colorOptionSnapshotHasAnyControls(optionDebugSnapshot) && refreshAttemptsRemaining > 0) {
+    const refreshed = await refreshCurrentDianxiaomiEditPage(page, "color option controls are missing")
+    if (refreshed) {
+      return trimColorSkcGroupsToLimit(page, maxGroups, refreshAttemptsRemaining - 1)
+    }
+  }
+
+  for (const labelText of plannedRemoveLabels) {
+    const currentState = await collectColorSkcGroupState(page)
+    if (currentState.groupCount <= maxGroups) {
+      break
+    }
+
+    const stillPresent = currentState.groups.some((group) => normalizeText(group.label) === normalizeText(labelText))
+    if (!stillPresent) {
+      continue
+    }
+
+    const labelAction: Record<string, unknown> = {
+      labelText,
+      beforeGroupCount: currentState.groupCount
+    }
+    const currentRowIndex = currentState.groups.findIndex((group) => normalizeText(group.label) === normalizeText(labelText))
+    labelAction.currentRowIndex = currentRowIndex
+    let optionLabel = await waitForVisibleColorOptionLabel(page, colorSection, labelText, currentRowIndex)
+    if (!optionLabel) {
+      await revealColorOptionTargets(page, colorSection, [labelText])
+      optionDebugSnapshot = await waitForColorOptionControlsSnapshot(page, colorSection, plannedRemoveLabels, 8_000)
+      optionLabel = await waitForVisibleColorOptionLabel(page, colorSection, labelText, currentRowIndex, 1_500)
+      labelAction.optionRecoveredAfterReveal = Boolean(optionLabel)
+    }
+
+    let toggleMethod = optionLabel ? "visible-option" : "text-fallback"
+    let toggle = optionLabel
+      ? await setColorOptionChecked(page, optionLabel, false)
+      : await setColorOptionCheckedByTextFallback(page, labelText, false)
+
+    if ((!toggle.found || toggle.clicked === false) && optionLabel) {
+      toggleMethod = "text-fallback-after-visible-option"
+      toggle = await setColorOptionCheckedByTextFallback(page, labelText, false)
+    }
+
+    if (!toggle.found || toggle.clicked === false) {
+      missingLabels.push(labelText)
+      labelActions.push({
+        ...labelAction,
+        toggleMethod,
+        toggle,
+        status: "missing"
+      })
+      console.log(`color-skc trim ${labelText}: toggle target missing`)
+      continue
+    }
+
+    const reduction = await waitForColorSkcReduction(page, currentState, labelText)
+    labelActions.push({
+      ...labelAction,
+      toggleMethod,
+      toggle,
+      removedFromTable: reduction.removedFromTable,
+      afterGroupCount: reduction.afterState.groupCount,
+      status: reduction.reduced ? "removed" : "not-removed"
+    })
+    console.log(
+      `color-skc trim ${labelText}: method=${toggleMethod} before=${currentState.groupCount} after=${reduction.afterState.groupCount} removed=${reduction.reduced}`
+    )
+
+    if (reduction.reduced) {
+      removedLabels.push(labelText)
+    } else {
+      failedLabels.push(labelText)
+    }
+  }
+
+  const after = await collectColorSkcGroupState(page, true)
+  const succeeded = after.groupCount <= maxGroups
+  return stepResult(
+    "trim-color-skc-groups",
+    "Trim color SKC groups",
+    succeeded ? "done" : "failed",
+    succeeded
+      ? `Trimmed color SKC groups from ${before.groupCount} to ${after.groupCount}; removed ${removedLabels.length}`
+      : `Color SKC groups still exceed the limit after trimming (${after.groupCount}/${maxGroups})`,
+    {
+      limit: maxGroups,
+      before,
+      after,
+      keepLabels,
+      plannedRemoveLabels,
+      removedLabels,
+      missingLabels,
+      failedLabels,
+      optionDebugSnapshot,
+      remapAction,
+      labelActions
+    }
+  )
+}
+
+const prepareRepairMediaPageSave = async (
+  page: Page,
+  draft: ListingDraft,
+  config: DianxiaomiSelectorConfig
+) => {
+  const correctionSteps: AutomationStepResult[] = []
+
+  const dialogsBeforeSavePrep = await getPageSafetyState(page)
+  if (dialogsBeforeSavePrep.visibleDialogCount > 0) {
+    const dismissed = await closeMediaSurfaceStackToBaseline(page, 0, config)
+    const dialogsAfterDismiss = await getPageSafetyState(page)
+    correctionSteps.push(stepResult(
+      "dismiss-residual-dialogs",
+      "Dismiss residual dialogs",
+      dismissed ? "done" : "failed",
+      dismissed
+        ? `Closed ${dialogsBeforeSavePrep.visibleDialogCount} blocking dialog(s) before page save`
+        : `Blocking dialogs remained before page save (${dialogsAfterDismiss.visibleDialogCount})`,
+      {
+        before: dialogsBeforeSavePrep,
+        after: dialogsAfterDismiss
+      }
+    ))
+  } else {
+    correctionSteps.push(stepResult(
+      "dismiss-residual-dialogs",
+      "Dismiss residual dialogs",
+      "skipped",
+      "No blocking dialog detected before page save"
+    ))
+  }
+
+  // In the real Dianxiaomi repair flow the color table often renders before the
+  // checkbox controls hydrate. Avoid refreshing here so a later save-failure
+  // recovery can operate on the settled failure state instead of resetting it.
+  correctionSteps.push(await trimColorSkcGroupsToLimit(page, COLOR_SKC_MAX_GROUPS, 0))
+  correctionSteps.push(await normalizeSizeChart(page))
+  correctionSteps.push(await normalizeSiteWarehouse(page))
+  correctionSteps.push(await normalizeShipmentPromise(page))
+  correctionSteps.push(await normalizeFreightTemplate(page))
+
+  const englishTitle = draft.listingTitle.trim()
+  if (englishTitle) {
+    correctionSteps.push(await fillEnglishTitleField(page, englishTitle, config))
+  } else {
+    correctionSteps.push(stepResult(
+      "fill-english-title",
+      "Fill english title",
+      "skipped",
+      "Task draft has no listing title for the English title field"
+    ))
+  }
+
+  correctionSteps.push(await normalizeOriginProvince(page))
+
+  if (draft.skuPricing.length > 0) {
+    const skuIdentifierSummary = await fillVisibleSkuIdentifierFields(page, draft.skuPricing)
+    correctionSteps.push(stepResult(
+      "fill-sku-identifiers",
+      "Fill SKU identifiers",
+      skuIdentifierSummary.visibleSkuCodeFields > 0 ? "done" : "skipped",
+      skuIdentifierSummary.visibleSkuCodeFields > 0
+        ? `Checked ${skuIdentifierSummary.visibleSkuCodeFields} visible SKU identifier field(s); filled ${skuIdentifierSummary.filledSkuCodes}`
+        : "No visible SKU identifier field was detected before page save",
+      skuIdentifierSummary
+    ))
+  } else {
+    correctionSteps.push(stepResult(
+      "fill-sku-identifiers",
+      "Fill SKU identifiers",
+      "skipped",
+      "Task draft has no SKU pricing data for SKU identifier correction"
+    ))
+  }
+
+  correctionSteps.push(await fillVisibleSkuLogisticsFields(page))
+
+  const failedCount = correctionSteps.filter((step) => step.status === "failed").length
+  const doneCount = correctionSteps.filter((step) => step.status === "done").length
+  return stepResult(
+    "repair-media-page-save-prep",
+    "Prepare media repair page save",
+    failedCount > 0 ? "failed" : doneCount > 0 ? "done" : "skipped",
+    failedCount > 0
+      ? `Prepared page save with ${doneCount} correction(s), ${failedCount} failed`
+      : doneCount > 0
+        ? `Prepared page save with ${doneCount} correction(s)`
+        : "No page-save correction was needed before saving media changes",
+    {
+      corrections: correctionSteps
+    }
+  )
+}
+
+const skuIdentifierCode = (sku: ListingSkuPricing, index: number, usedCodes: Set<string>) => {
+  const source = [
+    sku.skuId,
+    sku.skuName,
+    sku.attributeSummary,
+    ...Object.values(sku.attributes)
+  ].join(" ")
+  const ascii = source.replace(/[^a-z0-9]/gi, "").toUpperCase()
+  const stem = ascii && !/^\d+$/.test(ascii) ? ascii.slice(0, 18) : "SKU"
+  let code = `${stem}${String(index + 1).padStart(3, "0")}`.slice(0, 28)
+  let suffix = 1
+  while (usedCodes.has(code)) {
+    const uniqueSuffix = String(suffix).padStart(2, "0")
+    code = `${stem.slice(0, Math.max(1, 28 - uniqueSuffix.length))}${uniqueSuffix}`
+    suffix += 1
+  }
+  usedCodes.add(code)
+  return code
 }
 
 export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], config?: DianxiaomiSelectorConfig) => {
@@ -548,6 +3997,11 @@ export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], conf
   const usedRows = new Set<number>()
   let filledPrices = 0
   let filledStocks = 0
+  // P0-E: track the first SKU price field we successfully wrote so we can
+  // re-read its DOM value as hard evidence. Picked lazily on first fill so
+  // we only verify the field we actually wrote.
+  let firstPriceField: Locator | null = null
+  let firstPriceExpected = ""
 
   for (const [skuIndex, sku] of skus.entries()) {
     let selectedIndex = -1
@@ -581,6 +4035,10 @@ export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], conf
     if (priceField) {
       await fillTextField(priceField, sku.salePriceUsd.toFixed(2))
       filledPrices += 1
+      if (!firstPriceField) {
+        firstPriceField = priceField
+        firstPriceExpected = sku.salePriceUsd.toFixed(2)
+      }
     }
 
     if (stockField) {
@@ -590,11 +4048,31 @@ export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], conf
   }
 
   if (filledPrices === 0 && skus[0]) {
-    await fillSingleField(page, "price", skus[0].salePriceUsd.toFixed(2), config)
+    const fallback = await findField(page, "price", config)
+    if (fallback) {
+      await fillTextField(fallback, skus[0].salePriceUsd.toFixed(2))
+      filledPrices += 1
+      firstPriceField = fallback
+      firstPriceExpected = skus[0].salePriceUsd.toFixed(2)
+    } else {
+      await fillSingleField(page, "price", skus[0].salePriceUsd.toFixed(2), config)
+    }
   }
 
   if (filledStocks === 0 && skus[0]) {
     await fillSingleField(page, "stock", String(skus[0].stock), config)
+  }
+
+  const skuIdentifierSummary = await fillVisibleSkuIdentifierFields(page, skus)
+
+  // P0-E: re-read the first SKU price field after write. A non-match is
+  // recorded in the step data but does not flip status to "failed" — the
+  // existing step is still a partial success if some fields were filled.
+  let firstPriceVerified = true
+  let firstPriceActual = ""
+  if (firstPriceField && firstPriceExpected) {
+    firstPriceActual = await readFieldValue(firstPriceField).catch(() => "")
+    firstPriceVerified = firstPriceActual === firstPriceExpected
   }
 
   console.log(`SKU 填写完成：价格 ${filledPrices} 项，库存 ${filledStocks} 项`)
@@ -607,7 +4085,11 @@ export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], conf
       skuCount: skus.length,
       detectedRows: rows.length,
       filledPrices,
-      filledStocks
+      filledStocks,
+      ...skuIdentifierSummary,
+      firstPriceVerified,
+      firstPriceExpected,
+      firstPriceActual: firstPriceActual.slice(0, 40)
     }
   )
 }
@@ -648,6 +4130,9 @@ export const fillAttributes = async (page: Page, draft: ListingDraft, config?: D
 const visibleFlag = async (locator: Locator | null) =>
   locator && await locator.isVisible().catch(() => false) ? 1 : 0
 
+const presentFlag = async (locator: Locator | null) =>
+  locator && await locator.count().catch(() => 0) > 0 ? 1 : 0
+
 const getCurrentHost = (pageUrl: string) => {
   try {
     return new URL(pageUrl).hostname.toLowerCase()
@@ -666,6 +4151,11 @@ export const inspectDianxiaomiTargetSurface = async (
   const pageTitle = await page.title().catch(() => "")
   const host = getCurrentHost(pageUrl)
   const bodyText = normalizeText(await page.locator("body").innerText().catch(() => ""))
+  const manualLoginSurface = await inspectManualLoginSurface(page).catch(() => ({
+    shouldWaitForManualLogin: false,
+    reason: "manual login surface inspection unavailable",
+    currentUrl: pageUrl
+  }))
   const titleField = await findField(page, "title", config)
   const descriptionField = await findField(page, "description", config)
   const rows = await findSkuRows(page, config)
@@ -675,33 +4165,38 @@ export const inspectDianxiaomiTargetSurface = async (
   const submitButton = await findButtonByKeywords(page, SUBMIT_BUTTON_KEYWORDS, config.buttons?.submit)
   const mediaToolCount = (await collectMediaToolCandidates(page, config)).filter((tool) => tool.locator).length
   const fieldReadiness: TargetSurfaceInspection["fieldReadiness"] = {
-    title: await visibleFlag(titleField),
-    description: await visibleFlag(descriptionField),
+    title: await presentFlag(titleField),
+    description: await presentFlag(descriptionField),
     skuRows: rows.length,
-    price: await visibleFlag(priceField),
-    stock: await visibleFlag(stockField),
-    saveButton: await visibleFlag(saveButton),
-    submitButton: await visibleFlag(submitButton),
+    price: await presentFlag(priceField),
+    stock: await presentFlag(stockField),
+    saveButton: await presentFlag(saveButton),
+    submitButton: await presentFlag(submitButton),
     mediaTools: mediaToolCount,
     editableFields: await countVisible(page.locator(EDITABLE_SELECTOR), 200)
   }
   const hostMatchesDianxiaomi = isDianxiaomiHost(host)
   const dataFixture = pageUrl.startsWith("data:") && pageTitle.includes("Dianxiaomi Dry Run Fixture")
-  const loginOrCaptchaDetected = LOGIN_OR_CAPTCHA_KEYWORDS.some((keyword) =>
-    bodyText.includes(keyword.toLowerCase()) || pageTitle.toLowerCase().includes(keyword.toLowerCase())
-  )
   const hasTitleOrDescription = fieldReadiness.title > 0 || fieldReadiness.description > 0
   const hasPricingSurface = fieldReadiness.skuRows > 0 || (fieldReadiness.price > 0 && fieldReadiness.stock > 0)
   const hasActionOrMediaSignal = fieldReadiness.saveButton > 0 || fieldReadiness.submitButton > 0 || fieldReadiness.mediaTools > 0
   const hasEnoughEditableFields = fieldReadiness.editableFields >= 3
   const formReady = hasTitleOrDescription && hasPricingSurface && hasActionOrMediaSignal && hasEnoughEditableFields
+  const rawLoginKeywordDetected = LOGIN_OR_CAPTCHA_KEYWORDS.some((keyword) =>
+    bodyText.includes(keyword.toLowerCase()) || pageTitle.toLowerCase().includes(keyword.toLowerCase())
+  )
+  const loginOrCaptchaDetected = manualLoginSurface.shouldWaitForManualLogin && !formReady
   const canInspect = !loginOrCaptchaDetected && formReady && (hostMatchesDianxiaomi || dataFixture)
   const canWrite = canInspect
   const reasons = [
     hostMatchesDianxiaomi ? "host is Dianxiaomi" : `host is not Dianxiaomi: ${host || "none"}`,
     dataFixture ? "local dry-run fixture detected" : "not the local dry-run fixture",
     formReady ? "listing edit surface signals are present" : "listing edit surface signals are incomplete",
-    loginOrCaptchaDetected ? "login or captcha text detected" : "no login/captcha text detected"
+    loginOrCaptchaDetected
+      ? `login or captcha surface detected: ${manualLoginSurface.reason}`
+      : rawLoginKeywordDetected
+        ? `login text ignored because edit surface is present: ${manualLoginSurface.reason}`
+        : "no login/captcha surface detected"
   ]
   const surfaceStatus: TargetSurfaceStatus = loginOrCaptchaDetected
     ? "login-or-captcha"
@@ -743,37 +4238,73 @@ export const targetSurfaceCanWrite = (step: AutomationStepResult) =>
 export const targetSurfaceCanInspect = (step: AutomationStepResult) =>
   step.id === "target-surface" && (step.data as TargetSurfaceInspection | undefined)?.canInspect === true
 
-export const hasPublishSurface = async (page: Page) => {
-  const config = loadSelectorConfig(".runtime/dianxiaomi-selector-config.json")
+export const hasPublishSurface = async (page: Page, config = loadSelectorConfig(".runtime/dianxiaomi-selector-config.json")) => {
   const targetSurface = await inspectDianxiaomiTargetSurface(page, config)
   return targetSurfaceCanInspect(targetSurface)
 }
 
 export const waitForPublishPage = async (
   page: Page,
-  _config: DianxiaomiSelectorConfig = loadSelectorConfig(".runtime/dianxiaomi-selector-config.json"),
-  options: { waitForManualNavigation?: boolean } = {}
+  config: DianxiaomiSelectorConfig = loadSelectorConfig(".runtime/dianxiaomi-selector-config.json"),
+  options: { waitForManualNavigation?: boolean; targetUrl?: string; allowSameTargetRefresh?: boolean } = {}
 ) => {
-  if (await hasPublishSurface(page)) {
-    return
-  }
+  const timeoutMs = options.waitForManualNavigation === false ? 60_000 : 10 * 60 * 1000
+  const deadline = Date.now() + timeoutMs
+  let prompted = false
+  let autoNavigationAttempts = 0
+  let autoRefreshMatchingTargetAttempts = 0
 
-  if (options.waitForManualNavigation === false) {
-    return
-  }
-
-  console.log("当前还不是店小秘产品编辑/刊登表单。请在打开的浏览器中进入对应商品的编辑或刊登页，脚本会自动继续。")
-  await page.waitForFunction(
-    () => {
-      const text = document.body?.innerText?.toLowerCase() ?? ""
-      const editableCount = document.querySelectorAll("input:not([type='hidden']):not([disabled]), textarea:not([disabled]), [contenteditable='true']").length
-      return editableCount >= 3 && ["标题", "价格", "库存", "sku", "刊登", "商品"].some((keyword) => text.includes(keyword))
-    },
-    undefined,
-    {
-      timeout: 10 * 60 * 1000
+  while (Date.now() < deadline) {
+    if (await hasPublishSurface(page, config)) {
+      return
     }
-  )
+
+    const targetUrl = options.targetUrl?.trim()
+    const currentUrl = page.url()
+    const currentHost = getCurrentHost(currentUrl)
+    const canAutoReturnToTarget = isRealDianxiaomiEditTargetUrl(targetUrl)
+      && (isDianxiaomiHost(currentHost) || currentUrl === "about:blank")
+      && !isSameDianxiaomiEditPage(currentUrl, targetUrl)
+      && autoNavigationAttempts < 3
+    const canRefreshMatchingTarget = isRealDianxiaomiEditTargetUrl(targetUrl)
+      && options.allowSameTargetRefresh !== false
+      && isSameDianxiaomiEditPage(currentUrl, targetUrl)
+      && isDianxiaomiHost(currentHost)
+      && autoRefreshMatchingTargetAttempts < 3
+
+    if (canAutoReturnToTarget) {
+      autoNavigationAttempts += 1
+      console.log(`当前不是目标商品编辑页，正在自动跳转回目标页面：${targetUrl}`)
+      await page.goto(targetUrl!, {
+        waitUntil: "domcontentloaded"
+      }).catch((error) => {
+        console.warn(`自动跳转目标商品页失败（第 ${autoNavigationAttempts} 次）：${error instanceof Error ? error.message : String(error)}`)
+      })
+      await page.waitForTimeout(1000)
+      continue
+    }
+
+    if (canRefreshMatchingTarget) {
+      autoRefreshMatchingTargetAttempts += 1
+      console.log(`Target edit URL is loaded but the listing form is still missing; refreshing ${autoRefreshMatchingTargetAttempts}/3: ${targetUrl}`)
+      await page.goto(targetUrl!, {
+        waitUntil: "domcontentloaded"
+      }).catch((error) => {
+        console.warn(`Refresh of target edit page failed on attempt ${autoRefreshMatchingTargetAttempts}: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      await page.waitForTimeout(1500)
+      continue
+    }
+
+    if (options.waitForManualNavigation !== false && !prompted) {
+      console.log("当前还不是店小秘产品编辑/刊登表单。请在打开的浏览器中进入对应商品的编辑或刊登页，脚本会自动继续。")
+      prompted = true
+    }
+
+    await page.waitForTimeout(1000)
+  }
+
+  console.warn(`店小秘编辑表单等待超时：${Math.round(timeoutMs / 1000)}s`)
 }
 
 export const clickByKeywords = async (page: Page, keywords: string[], selectors?: string[]) => {
@@ -797,6 +4328,115 @@ export const clickByKeywords = async (page: Page, keywords: string[], selectors?
   return false
 }
 
+const readInteractiveText = async (locator: Locator) =>
+  cleanVisibleText(
+    await locator.innerText().catch(async () => await locator.getAttribute("value").catch(() => ""))
+  )
+
+const isLocatorInsideVisibleDialog = async (locator: Locator) =>
+  locator.evaluate((element, selector) => {
+    const container = element.closest(selector)
+    if (!(container instanceof HTMLElement)) {
+      return false
+    }
+
+    const style = window.getComputedStyle(container)
+    const rect = container.getBoundingClientRect()
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+  }, BLOCKING_DIALOG_SELECTOR).catch(() => false)
+
+const findPreferredButtonByKeywords = async (
+  page: Page,
+  keywords: string[],
+  options: {
+    exactTexts?: string[]
+    excludeKeywords?: string[]
+    excludeInsideDialogs?: boolean
+    selectors?: string[]
+  } = {}
+) => {
+  const exactTexts = options.exactTexts ?? keywords
+  const excludeKeywords = options.excludeKeywords ?? []
+  const isExcluded = (text: string) => excludeKeywords.some((keyword) => text.includes(keyword))
+  const matchesExact = (text: string) => exactTexts.some((keyword) => text === keyword)
+  const matchesKeyword = (text: string) => keywords.some((keyword) => text.includes(keyword))
+
+  const configured = await findByConfiguredSelectors(page, options.selectors)
+  if (configured) {
+    const configuredText = await readInteractiveText(configured)
+    if (
+      configuredText
+      && !isExcluded(configuredText)
+      && (!options.excludeInsideDialogs || !await isLocatorInsideVisibleDialog(configured))
+      && (matchesExact(configuredText) || matchesKeyword(configuredText))
+    ) {
+      return configured
+    }
+  }
+
+  for (const keyword of exactTexts) {
+    const exactButton = page.getByRole("button", {
+      name: new RegExp(`^\\s*${escapeRegExp(keyword)}\\s*$`, "i")
+    })
+    const candidate = exactButton.first()
+    if (
+      await candidate.isVisible().catch(() => false)
+      && (!options.excludeInsideDialogs || !await isLocatorInsideVisibleDialog(candidate))
+    ) {
+      return candidate
+    }
+  }
+
+  const actions = page.locator("button, [role='button'], input[type='button'], input[type='submit']")
+  const count = Math.min(await actions.count().catch(() => 0), 60)
+  let bestPartial: {
+    locator: Locator
+    score: number
+  } | null = null
+
+  for (let index = 0; index < count; index += 1) {
+    const action = actions.nth(index)
+    if (!await action.isVisible().catch(() => false)) {
+      continue
+    }
+
+    if (options.excludeInsideDialogs && await isLocatorInsideVisibleDialog(action)) {
+      continue
+    }
+
+    const text = await readInteractiveText(action)
+    if (!text || isExcluded(text) || !matchesKeyword(text)) {
+      continue
+    }
+
+    if (matchesExact(text)) {
+      return action
+    }
+
+    const score = text.length + (text.includes("并") ? 120 : 0)
+    if (!bestPartial || score < bestPartial.score) {
+      bestPartial = {
+        locator: action,
+        score
+      }
+    }
+  }
+
+  return bestPartial?.locator ?? null
+}
+
+const findSaveDraftButton = async (page: Page, selectors?: string[]) =>
+  findPreferredButtonByKeywords(
+    page,
+    ["保存草稿", "保存", "暂存", "save draft", "save"],
+    {
+      exactTexts: ["保存草稿", "保存", "暂存", "save draft", "save"],
+      excludeKeywords: ["待发布", "移入", "发布"],
+      excludeInsideDialogs: true,
+      selectors
+    }
+  )
+
 const findButtonByKeywords = async (page: Page, keywords: string[], selectors?: string[]) => {
   const configured = await findByConfiguredSelectors(page, selectors)
   if (configured) {
@@ -816,6 +4456,43 @@ const findButtonByKeywords = async (page: Page, keywords: string[], selectors?: 
   return null
 }
 
+const isLikelyCompactInteractive = async (locator: Locator) => locator.evaluate((element) => {
+  const tagName = element.tagName.toLowerCase()
+  const role = element.getAttribute("role") ?? ""
+  const className = typeof element.className === "string" ? element.className : ""
+  const text = (element.textContent ?? "").replace(/\s+/g, " ").trim()
+  const tabIndex = element.getAttribute("tabindex")
+  const hasUsableTabIndex = tabIndex !== null && tabIndex !== "-1"
+  const hasInteractiveRole = ["button", "link", "menuitem"].includes(role)
+  const isIntrinsicControl = ["button", "a", "input"].includes(tagName)
+
+  if (isIntrinsicControl || hasInteractiveRole) {
+    return text.length <= 160
+  }
+
+  const looksClickable = element.hasAttribute("onclick")
+    || hasUsableTabIndex
+    || getComputedStyle(element).cursor === "pointer"
+    || /\b(btn|button|tool|action|operate|menu|media|image|upload|translate|resize|editor|manage)\b/i.test(className)
+
+  return looksClickable && text.length > 0 && text.length <= 100
+}).catch(() => false)
+
+const firstCompactInteractiveVisible = async (locators: Locator[]) => {
+  for (const locator of locators) {
+    const count = await locator.count().catch(() => 0)
+
+    for (let index = 0; index < count; index += 1) {
+      const item = locator.nth(index)
+      if (await item.isVisible().catch(() => false) && await isLikelyCompactInteractive(item)) {
+        return item
+      }
+    }
+  }
+
+  return null
+}
+
 const findInteractiveByKeywords = async (page: Page, keywords: string[], selectors?: string[]) => {
   const configured = await findByConfiguredSelectors(page, selectors)
   if (configured) {
@@ -824,16 +4501,2009 @@ const findInteractiveByKeywords = async (page: Page, keywords: string[], selecto
 
   for (const keyword of keywords) {
     const pattern = new RegExp(escapeRegExp(keyword), "i")
-    const match = await firstVisible([
+    const valueSelector = [
+      `input[type='button'][value*="${keyword}" i]`,
+      `input[type='submit'][value*="${keyword}" i]`,
+      `[aria-label*="${keyword}" i]`,
+      `[title*="${keyword}" i]`
+    ].join(", ")
+    const match = await firstCompactInteractiveVisible([
       page.getByRole("button", { name: pattern }),
       page.getByRole("link", { name: pattern }),
       page.getByRole("menuitem", { name: pattern }),
       page.locator("button, a, [role='button'], [role='menuitem'], input[type='button']").filter({ hasText: pattern }),
-      page.locator("label, span, div").filter({ hasText: pattern })
+      page.locator(valueSelector),
+      page.locator("[onclick], [tabindex]:not([tabindex='-1']), [class*='btn' i], [class*='button' i], [class*='tool' i], [class*='action' i], [class*='operate' i], [class*='menu' i]").filter({ hasText: pattern })
     ])
 
     if (match) {
       return match
+    }
+  }
+
+  return null
+}
+
+const waitForDianxiaomiLoadingOverlayToClear = async (page: Page, timeoutMs = 20_000) =>
+  page.waitForFunction(() => {
+    const isVisible = (element: Element) => {
+      if (!(element instanceof HTMLElement)) {
+        return false
+      }
+      const style = window.getComputedStyle(element)
+      const rect = element.getBoundingClientRect()
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+    }
+
+    return Array.from(document.querySelectorAll("#dPageLoading, .d-page-loading")).every((element) => !isVisible(element))
+  }, undefined, {
+    timeout: timeoutMs
+  }).then(() => true).catch(() => false)
+
+const clickAfterDianxiaomiIdle = async (page: Page, locator: Locator, attempts = 3) => {
+  let lastError: unknown = null
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    await waitForDianxiaomiLoadingOverlayToClear(page)
+    try {
+      await locator.scrollIntoViewIfNeeded({
+        timeout: 5_000
+      })
+      await locator.click({
+        timeout: 5_000
+      })
+      return true
+    } catch (error) {
+      lastError = error
+      await page.waitForTimeout(750)
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "Dianxiaomi click failed"))
+}
+
+const dismissStartupModalIfPresent = async (page: Page) => {
+  const dialogs = await visibleAntModalLocators(page)
+  const dialog = dialogs[dialogs.length - 1] ?? null
+  if (!dialog) {
+    return stepResult("dismiss-startup-modal", "Dismiss startup modal", "skipped", "No blocking startup modal detected")
+  }
+
+  const closeButton = await firstVisible([
+    dialog.locator(".ant-modal-close"),
+    dialog.locator("[aria-label*='close' i]"),
+    dialog.locator("[title*='close' i]")
+  ]) ?? await findInteractiveInRootByKeywords(dialog, [
+    "\u5173\u95ed",
+    "\u53d6\u6d88",
+    "\u6211\u77e5\u9053\u4e86",
+    "\u77e5\u9053\u4e86",
+    "\u7ee7\u7eed\u7f16\u8f91",
+    "\u786e\u5b9a",
+    "\u786e\u8ba4",
+    "close",
+    "cancel",
+    "continue",
+    "ok"
+  ])
+
+  if (!closeButton) {
+    return stepResult("dismiss-startup-modal", "Dismiss startup modal", "skipped", "A startup modal is visible but no safe close control was detected")
+  }
+
+  const beforeCount = dialogs.length
+  await clickAfterDianxiaomiIdle(page, closeButton, 1)
+  const dismissed = await waitForVisibleAntModalCountAtMost(page, Math.max(0, beforeCount - 1), 5_000)
+  return stepResult(
+    "dismiss-startup-modal",
+    "Dismiss startup modal",
+    dismissed ? "done" : "failed",
+    dismissed ? "Closed the blocking startup modal" : "Tried to close the startup modal but it remained visible"
+  )
+}
+
+const findVisibleMenuItemByKeywords = async (page: Page, keywords: string[]) => {
+  for (const keyword of keywords) {
+    const pattern = new RegExp(escapeRegExp(keyword), "i")
+    const attributeSelector = [
+      `[title*="${keyword}" i]`,
+      `[aria-label*="${keyword}" i]`
+    ].join(", ")
+    const match = await firstCompactInteractiveVisible([
+      page.locator(".ant-dropdown:visible [role='menuitem'], .ant-dropdown-menu:visible [role='menuitem']").filter({ hasText: pattern }),
+      page.locator(".ant-dropdown:visible .ant-dropdown-menu-item, .ant-dropdown-menu:visible .ant-dropdown-menu-item").filter({ hasText: pattern }),
+      page.getByRole("menuitem", { name: pattern }),
+      page.locator([
+        "body > div:visible button",
+        "body > div:visible a",
+        "body > div:visible [role='button']",
+        "body > div:visible [role='menuitem']",
+        "body > div:visible li",
+        "body > div:visible span",
+        "body > div:visible div"
+      ].join(", ")).filter({ hasText: pattern }),
+      page.locator(attributeSelector),
+      page.locator("button, a, [role='button'], [role='menuitem']").filter({ hasText: pattern })
+    ])
+
+    if (match) {
+      return match
+    }
+  }
+
+  return null
+}
+
+const clickVisibleMenuItemByKeywords = async (page: Page, keywords: string[], attempts = 2) => {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const match = await findVisibleMenuItemByKeywords(page, keywords)
+    if (!match) {
+      return false
+    }
+
+    try {
+      await clickAfterDianxiaomiIdle(page, match, 1)
+      await page.waitForTimeout(300)
+      return true
+    } catch {
+      const forced = await forceDomClick(match)
+      if (forced) {
+        await page.waitForTimeout(300)
+        return true
+      }
+      await page.waitForTimeout(250)
+    }
+  }
+
+  return false
+}
+
+const buildSkuImageRowText = (cellText: string, previousText: string) => {
+  const normalizedCellText = cleanVisibleText(cellText)
+    .replace(/选择图片/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (normalizedCellText) {
+    return normalizedCellText
+  }
+
+  return cleanVisibleText(previousText)
+}
+
+const probeProductImages = async (page: Page, imageUrls: string[]): Promise<ProbedProductImage[]> => {
+  const uniqueUrls = Array.from(new Set(imageUrls.map((item) => item.trim()).filter(Boolean)))
+  if (uniqueUrls.length === 0) {
+    return []
+  }
+
+  const probed = await page.evaluate(async (urls) =>
+    Promise.all(urls.map((url) =>
+      new Promise<ProbedProductImage>((resolve) => {
+        const img = new Image()
+        img.referrerPolicy = "no-referrer"
+        img.onload = () => resolve({
+          url,
+          width: img.naturalWidth || 0,
+          height: img.naturalHeight || 0,
+          loaded: true,
+          aspectRatio: img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : null
+        })
+        img.onerror = () => resolve({
+          url,
+          width: 0,
+          height: 0,
+          loaded: false,
+          aspectRatio: null
+        })
+        img.src = url
+      })
+    )),
+  uniqueUrls)
+
+  return probed
+}
+
+const skuImageDistanceFromTarget = (image: ProbedProductImage) =>
+  image.aspectRatio === null
+    ? Number.POSITIVE_INFINITY
+    : Math.abs(image.aspectRatio - SKU_IMAGE_TARGET_RATIO)
+
+const unwrapWeservSkuSourceUrl = (value: string) => {
+  let current = value.trim()
+
+  for (let depth = 0; depth < 3; depth += 1) {
+    let parsed: URL
+    try {
+      parsed = new URL(current)
+    } catch {
+      return current
+    }
+
+    if (parsed.hostname.toLowerCase() !== "images.weserv.nl") {
+      return current
+    }
+
+    const source = parsed.searchParams.get("url")?.trim()
+    if (!source) {
+      return current
+    }
+
+    current = /^https?:\/\//i.test(source)
+      ? source
+      : `https://${source.replace(/^\/+/, "")}`
+  }
+
+  return current
+}
+
+const canonicalizeSkuImageBaseUrl = (value: string) => {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  try {
+    const parsed = new URL(unwrapWeservSkuSourceUrl(trimmed))
+    if (!/^https?:$/i.test(parsed.protocol)) {
+      return null
+    }
+
+    parsed.searchParams.delete("sku3x4")
+    parsed.hash = ""
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
+const buildStrictSkuNetworkUrls = (image: Pick<ProbedProductImage, "url">) => {
+  const baseUrl = canonicalizeSkuImageBaseUrl(image.url)
+  if (!baseUrl) {
+    return []
+  }
+
+  const sku3x4Variants = ["1", "2", "3"].map((variant) => {
+    const parsed = new URL(baseUrl)
+    parsed.searchParams.set("sku3x4", variant)
+    return parsed.toString()
+  })
+
+  const weservContainVariants = ["FFFFFF", "ffffff"].map((background) => {
+    const parsed = new URL("https://images.weserv.nl/")
+    parsed.searchParams.set("url", baseUrl.replace(/^https?:\/\//i, ""))
+    parsed.searchParams.set("w", String(SKU_IMAGE_MIN_WIDTH_PX))
+    parsed.searchParams.set("h", String(SKU_IMAGE_MIN_HEIGHT_PX))
+    parsed.searchParams.set("fit", "contain")
+    parsed.searchParams.set("bg", background)
+    parsed.searchParams.set("output", "jpg")
+    return parsed.toString()
+  })
+
+  return Array.from(new Set([
+    ...sku3x4Variants,
+    ...weservContainVariants
+  ]))
+}
+
+const isStrictSkuImageCandidate = (image: ProbedProductImage) =>
+  image.loaded
+  && image.aspectRatio !== null
+  && image.aspectRatio >= SKU_IMAGE_STRICT_RATIO_MIN
+  && image.aspectRatio <= SKU_IMAGE_STRICT_RATIO_MAX
+  && image.width >= SKU_IMAGE_MIN_WIDTH_PX
+  && image.height >= SKU_IMAGE_MIN_HEIGHT_PX
+
+const fillSkuImageUrlCount = (urls: string[], minimumCount: number) => {
+  const normalized = urls.map((item) => item.trim()).filter(Boolean)
+  if (normalized.length === 0) {
+    return []
+  }
+
+  const filled = normalized.slice(0, minimumCount)
+  let duplicateIndex = 0
+
+  while (filled.length < minimumCount) {
+    filled.push(normalized[duplicateIndex % normalized.length] ?? normalized[normalized.length - 1]!)
+    duplicateIndex += 1
+  }
+
+  return filled
+}
+
+const selectSkuImageCandidates = (images: ProbedProductImage[]) => {
+  const strict = images
+    .filter(isStrictSkuImageCandidate)
+    .sort((left, right) =>
+      skuImageDistanceFromTarget(left) - skuImageDistanceFromTarget(right)
+      || right.height - left.height
+      || right.width - left.width
+    )
+
+  const preferred = images
+    .filter((image) =>
+      image.loaded
+      && image.aspectRatio !== null
+      && image.aspectRatio >= SKU_IMAGE_RATIO_MIN
+      && image.aspectRatio <= SKU_IMAGE_RATIO_MAX
+      && image.width >= SKU_IMAGE_MIN_WIDTH_PX
+      && image.height >= SKU_IMAGE_MIN_HEIGHT_PX
+    )
+    .sort((left, right) =>
+      skuImageDistanceFromTarget(left) - skuImageDistanceFromTarget(right)
+      || right.height - left.height
+      || right.width - left.width
+    )
+
+  const fallback = preferred.length >= SKU_IMAGE_MIN_COUNT
+    ? preferred
+    : images
+      .filter((image) =>
+        image.loaded
+        && image.aspectRatio !== null
+        && image.aspectRatio >= SKU_IMAGE_FALLBACK_RATIO_MIN
+        && image.aspectRatio <= SKU_IMAGE_FALLBACK_RATIO_MAX
+        && image.width >= SKU_IMAGE_FALLBACK_MIN_WIDTH_PX
+        && image.height >= SKU_IMAGE_FALLBACK_MIN_HEIGHT_PX
+      )
+      .sort((left, right) =>
+        skuImageDistanceFromTarget(left) - skuImageDistanceFromTarget(right)
+        || right.height - left.height
+        || right.width - left.width
+      )
+
+  return {
+    strict,
+    preferred,
+    selected: (
+      strict.length > 0
+        ? strict
+        : preferred.length >= SKU_IMAGE_MIN_COUNT
+          ? preferred
+          : fallback
+    ).slice(0, Math.max(SKU_IMAGE_MIN_COUNT, 10))
+  }
+}
+
+const selectSquareImageCandidates = (images: ProbedProductImage[]) =>
+  images
+    .filter((image) =>
+      image.loaded
+      && image.aspectRatio !== null
+      && image.aspectRatio >= SECTION_SQUARE_RATIO_MIN
+      && image.aspectRatio <= SECTION_SQUARE_RATIO_MAX
+    )
+    .sort((left, right) => right.width * right.height - left.width * left.height)
+
+const isSquareAspectRatio = (aspectRatio: number | null) =>
+  aspectRatio !== null
+  && aspectRatio >= SECTION_SQUARE_RATIO_MIN
+  && aspectRatio <= SECTION_SQUARE_RATIO_MAX
+
+const collectMaterialImageCandidateUrls = async (page: Page): Promise<string[]> =>
+  page.locator(".material-img-module img").evaluateAll((nodes) =>
+    Array.from(new Set(
+      nodes
+        .map((node) => {
+          const image = node as HTMLImageElement
+          return image.currentSrc || image.src || ""
+        })
+        .map((value) => value.trim())
+        .filter((value) => /^https?:\/\//i.test(value))
+    ))
+  ).catch(() => [] as string[])
+
+const buildSquarePreviewReplacementUrls = async (page: Page, imageUrls: string[]) => {
+  const materialImageUrls = await collectMaterialImageCandidateUrls(page)
+  const candidateUrls = Array.from(new Set([
+    ...materialImageUrls,
+    ...imageUrls.map((item) => item.trim()).filter(Boolean)
+  ]))
+  const probedCandidates = await probeProductImages(page, candidateUrls)
+  const squareCandidates = selectSquareImageCandidates(probedCandidates)
+  return {
+    materialImageUrls,
+    probedCandidates,
+    squareCandidates,
+    replacementUrls: fillSkuImageUrlCount(squareCandidates.map((item) => item.url), Math.max(SKU_IMAGE_MIN_COUNT, 3))
+  }
+}
+
+const findSkuImageCells = async (page: Page, maxRows = 40) => {
+  const cells = page.locator("td.color-table-cell[data-column-index='2']")
+  const count = Math.min(await cells.count().catch(() => 0), Math.max(1, maxRows))
+  const targets: SkuImageCellTarget[] = []
+
+  for (let index = 0; index < count; index += 1) {
+    const cell = cells.nth(index)
+    if (!await cell.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const rowIndexAttr = await cell.getAttribute("data-row-index").catch(() => null)
+    const rowIndex = rowIndexAttr && Number.isFinite(Number(rowIndexAttr)) ? Number(rowIndexAttr) : targets.length
+    const row = cell.locator("xpath=ancestor::tr[1]")
+    const rowText = buildSkuImageRowText(
+      await cell.innerText().catch(() => ""),
+      await row.innerText().catch(() => "")
+    )
+    targets.push({
+      cell,
+      rowIndex,
+      rowText
+    })
+  }
+
+  return targets
+}
+
+const captureSkuRepairScreenshot = async (
+  page: Page,
+  screenshotDir: string | undefined,
+  prefix: string,
+  rowIndex: number
+) => {
+  if (!screenshotDir) {
+    return null
+  }
+
+  const screenshotPath = path.join(
+    screenshotDir,
+    `${safeArtifactName(prefix)}-row-${rowIndex}-${new Date().toISOString().replace(/[:.]/g, "-")}.png`
+  )
+  await page.screenshot({
+    path: screenshotPath,
+    fullPage: true
+  }).catch(() => undefined)
+  return screenshotPath
+}
+
+const readSkuImageCellState = async (cell: Locator): Promise<SkuImageCellState> => {
+  const imageMeta = await cell.locator("img").evaluateAll((nodes) =>
+    nodes.map((node) => {
+      const img = node as HTMLImageElement
+      const width = img.naturalWidth || 0
+      const height = img.naturalHeight || 0
+      return {
+        src: img.getAttribute("src") ?? "",
+        width,
+        height,
+        aspectRatio: width > 0 && height > 0 ? width / height : null
+      }
+    })
+  ).catch(() => [] as SkuImageCellState["imageMeta"])
+
+  return {
+    imageCount: imageMeta.length,
+    imageUrls: imageMeta.map((item) => item.src).filter(Boolean),
+    imageMeta
+  }
+}
+
+const clearSkuImageCell = async (page: Page, cell: Locator, maxRemovals = 20) => {
+  let removed = 0
+
+  for (let attempt = 0; attempt < maxRemovals; attempt += 1) {
+    const beforeCount = await cell.locator("img").count().catch(() => 0)
+    const deleteButton = await firstVisible([
+      cell.locator(".icon_delete"),
+      cell.locator("[class*='delete' i]"),
+      cell.locator("[class*='remove' i]")
+    ])
+    if (!deleteButton) {
+      break
+    }
+
+    await clickAfterDianxiaomiIdle(page, deleteButton, 2)
+    removed += 1
+
+    const confirmDialog = (await visibleAntModalLocators(page)).at(-1) ?? null
+    if (confirmDialog) {
+      const confirmButton = await findInteractiveInRootByKeywords(confirmDialog, [
+        "确定",
+        "确认",
+        "删除",
+        "ok",
+        "confirm"
+      ])
+      if (confirmButton) {
+        await clickAfterDianxiaomiIdle(page, confirmButton, 1)
+      }
+    }
+
+    await page.waitForTimeout(350)
+    if (beforeCount > 0) {
+      await page.waitForFunction(
+        ({ selector, before }) => {
+          const element = document.querySelector(selector)
+          if (!element) {
+            return true
+          }
+          return element.querySelectorAll("img").length < before
+        },
+        {
+          selector: `[data-row-index="${await cell.getAttribute("data-row-index").catch(() => "")}"][data-column-index="2"]`,
+          before: beforeCount
+        },
+        {
+          timeout: 2_000
+        }
+      ).catch(() => {})
+    }
+  }
+
+  const state = await readSkuImageCellState(cell)
+  return {
+    removed,
+    remaining: state.imageCount,
+    state
+  }
+}
+
+const openSkuImageNetworkDialog = async (page: Page, cell: Locator) => {
+  const chooseButton = await firstVisible([
+    cell.getByRole("button", { name: /选择图片/i }),
+    cell.locator("button").filter({ hasText: /选择图片/ }),
+    cell.locator("[role='button']").filter({ hasText: /选择图片/ })
+  ])
+  if (!chooseButton) {
+    return {
+      opened: false,
+      reason: "选择图片 button not found",
+      dialog: null as Locator | null
+    }
+  }
+
+  await clickAfterDianxiaomiIdle(page, chooseButton, 2)
+  await page.waitForTimeout(300)
+
+  const networkClicked = await clickVisibleMenuItemByKeywords(page, ["网络图片", "网络地址"], 3)
+  if (!networkClicked) {
+    return {
+      opened: false,
+      reason: "网络图片 menu item not found",
+      dialog: null as Locator | null
+    }
+  }
+
+  await page.waitForTimeout(500)
+  const dialogs = await visibleAntModalLocators(page)
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const dialog = dialogs[index]
+    const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+    if (keywordMatch(text, SKU_IMAGE_DIALOG_KEYWORDS)) {
+      return {
+        opened: true,
+        reason: "ok",
+        dialog
+      }
+    }
+  }
+
+  return {
+    opened: false,
+    reason: "network image dialog did not appear",
+    dialog: null as Locator | null
+  }
+}
+
+const submitSkuImageUrls = async (page: Page, dialog: Locator, urls: string[]) => {
+  const input = await firstVisible([
+    dialog.locator("textarea"),
+    dialog.locator("input:not([type='hidden']):not([type='checkbox']):not([type='radio']):not([type='button']):not([type='submit']):not([type='file'])")
+  ])
+  if (!input) {
+    return {
+      added: false,
+      reason: "network image dialog input missing",
+      feedback: null as SubmitFeedback | null
+    }
+  }
+
+  const beforeDialogCount = (await visibleAntModalLocators(page)).length
+  await fillTextField(input, urls.join("\n"))
+  const addButton = await findInteractiveInRootByKeywords(dialog, ["添加", "确定", "确认", "add", "confirm"])
+  if (!addButton) {
+    return {
+      added: false,
+      reason: "network image dialog add button missing",
+      feedback: null as SubmitFeedback | null
+    }
+  }
+
+  const previousFeedback = await readSubmitFeedback(page)
+  await clickAfterDianxiaomiIdle(page, addButton, 2)
+
+  const feedback = await waitForSubmitFeedback(page, 8_000, previousFeedback, 1_500)
+  const dialogClosed = await waitForVisibleAntModalCountAtMost(page, Math.max(0, beforeDialogCount - 1), 8_000)
+  if (feedback.state === "failure" && keywordMatch(feedback.message, SKU_IMAGE_DIALOG_FAILURE_KEYWORDS)) {
+    return {
+      added: false,
+      reason: feedback.message || "network image add failed",
+      feedback
+    }
+  }
+
+  if (!dialogClosed) {
+    const dialogText = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+    if (keywordMatch(dialogText, SKU_IMAGE_DIALOG_FAILURE_KEYWORDS)) {
+      return {
+        added: false,
+        reason: dialogText,
+        feedback
+      }
+    }
+  }
+
+  return {
+    added: dialogClosed,
+    reason: dialogClosed ? "ok" : "network image dialog remained open",
+    feedback
+  }
+}
+
+const clearSkuImageCellStable = async (page: Page, cell: Locator, maxRemovals = 20) => {
+  let removed = 0
+
+  for (let attempt = 0; attempt < maxRemovals; attempt += 1) {
+    const beforeCount = await cell.locator("img").count().catch(() => 0)
+    if (beforeCount === 0) {
+      break
+    }
+
+    const deleteButton = await firstVisible([
+      cell.locator(".icon_delete"),
+      cell.locator("[class*='delete' i]"),
+      cell.locator("[class*='remove' i]")
+    ])
+    if (!deleteButton) {
+      break
+    }
+
+    try {
+      await clickAfterDianxiaomiIdle(page, deleteButton, 2)
+    } catch {
+      const forced = await forceDomClick(deleteButton)
+      if (!forced) {
+        break
+      }
+    }
+    removed += 1
+    await page.waitForTimeout(300)
+
+    const afterCount = await cell.locator("img").count().catch(() => beforeCount)
+    if (afterCount >= beforeCount) {
+      await page.waitForTimeout(500)
+    }
+  }
+
+  const state = await readSkuImageCellState(cell)
+  return {
+    removed,
+    remaining: state.imageCount,
+    state
+  }
+}
+
+const findSkuChooseButton = async (cell: Locator) =>
+  firstVisible([
+    cell.getByRole("button", { name: /閫夋嫨鍥剧墖/i }),
+    cell.locator("button").filter({ hasText: /閫夋嫨鍥剧墖/ }),
+    cell.locator("[role='button']").filter({ hasText: /閫夋嫨鍥剧墖/ }),
+    cell.locator(".ant-btn").filter({ hasText: /閫夋嫨鍥剧墖/ }),
+    cell.locator("button"),
+    cell.locator("[role='button']"),
+    cell.locator(".ant-btn")
+  ])
+
+const openSkuChooseMenuStable = async (page: Page, cell: Locator) => {
+  const chooseButton = await findSkuChooseButton(cell)
+  if (!chooseButton) {
+    return {
+      opened: false,
+      reason: "sku image choose button not found",
+      menuCount: 0
+    }
+  }
+
+  await cell.evaluate((element) => {
+    if (element instanceof HTMLElement) {
+      element.scrollIntoView({
+        block: "center"
+      })
+    }
+  }).catch(() => {})
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await clickAfterDianxiaomiIdle(page, chooseButton, 2)
+    } catch {
+      const forced = await forceDomClick(chooseButton)
+      if (!forced) {
+        return {
+          opened: false,
+          reason: "sku image choose button click failed",
+          menuCount: 0
+        }
+      }
+    }
+
+    await page.waitForTimeout(400 + attempt * 250)
+    const menuItems = page.locator(".ant-dropdown:visible .ant-dropdown-menu-item, .ant-dropdown-menu:visible .ant-dropdown-menu-item, [role='menu']:visible [role='menuitem']")
+    const menuCount = await menuItems.count().catch(() => 0)
+    if (menuCount > 0) {
+      return {
+        opened: true,
+        reason: "ok",
+        menuCount
+      }
+    }
+  }
+
+  return {
+    opened: false,
+    reason: "sku image choose menu did not appear",
+    menuCount: 0
+  }
+}
+
+const applySkuImagesToAllColors = async (page: Page, cell: Locator) => {
+  const menu = await openSkuChooseMenuStable(page, cell)
+  if (!menu.opened) {
+    return {
+      applied: false,
+      reason: menu.reason,
+      menu
+    }
+  }
+
+  const menuItems = page.locator(".ant-dropdown:visible .ant-dropdown-menu-item, .ant-dropdown-menu:visible .ant-dropdown-menu-item, [role='menu']:visible [role='menuitem']")
+  const menuCount = Math.min(await menuItems.count().catch(() => 0), 12)
+  let applyAllItem: Locator | null = null
+
+  const explicitItem = page.locator(".ant-dropdown:visible [data-menu-id='quoteAllColor'], .ant-dropdown-menu:visible [data-menu-id='quoteAllColor'], [role='menu']:visible [data-menu-id='quoteAllColor']").first()
+  if (await explicitItem.isVisible().catch(() => false)) {
+    applyAllItem = explicitItem
+  }
+
+  if (!applyAllItem) {
+    for (let index = 0; index < menuCount; index += 1) {
+      const item = menuItems.nth(index)
+      if (!await item.isVisible().catch(() => false)) {
+        continue
+      }
+
+      const text = cleanVisibleText(await item.innerText().catch(() => ""))
+      if (
+        text.includes("\u6240\u6709\u989c\u8272")
+        || text.includes("\u5168\u90e8\u989c\u8272")
+        || /apply.*all.*color/i.test(text)
+      ) {
+        applyAllItem = item
+        break
+      }
+    }
+  }
+
+  if (!applyAllItem && menuCount >= 5) {
+    applyAllItem = menuItems.nth(4)
+  }
+
+  if (!applyAllItem) {
+    return {
+      applied: false,
+      reason: "apply-to-all-colors menu item not found",
+      menu
+    }
+  }
+
+  try {
+    await clickAfterDianxiaomiIdle(page, applyAllItem, 2)
+  } catch {
+    const forced = await forceDomClick(applyAllItem)
+    if (!forced) {
+      return {
+        applied: false,
+        reason: "apply-to-all-colors menu item click failed",
+        menu
+      }
+    }
+  }
+
+  await page.waitForTimeout(600)
+  const confirmButton = await firstVisible([
+    page.locator(".ant-modal:visible .ant-btn-primary"),
+    page.locator(".ant-modal:visible button").filter({ hasText: /\u786e\u5b9a|\u786e\u8ba4|\u5e94\u7528|apply|confirm/i }).first()
+  ])
+  if (confirmButton) {
+    try {
+      await clickAfterDianxiaomiIdle(page, confirmButton, 1)
+    } catch {
+      await forceDomClick(confirmButton)
+    }
+    await page.waitForTimeout(1_000)
+  }
+
+  return {
+    applied: true,
+    reason: "ok",
+    menu
+  }
+}
+
+const openSkuImageNetworkDialogStable = async (page: Page, cell: Locator) => {
+  const chooseButton = await findSkuChooseButton(cell)
+  if (!chooseButton) {
+    return {
+      opened: false,
+      reason: "sku image choose button not found",
+      dialog: null as Locator | null
+    }
+  }
+
+  await cell.evaluate((element) => {
+    if (element instanceof HTMLElement) {
+      element.scrollIntoView({
+        block: "center"
+      })
+    }
+  }).catch(() => {})
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await clickAfterDianxiaomiIdle(page, chooseButton, 2)
+    } catch {
+      const forced = await forceDomClick(chooseButton)
+      if (!forced) {
+        return {
+          opened: false,
+          reason: "sku image choose button click failed",
+          dialog: null as Locator | null
+        }
+      }
+    }
+    await page.waitForTimeout(400 + attempt * 200)
+
+    const networkClicked = await clickVisibleMenuItemByKeywords(page, ["缃戠粶鍥剧墖", "缃戠粶鍦板潃", "url"], 3)
+    if (!networkClicked) {
+      continue
+    }
+
+    await page.waitForTimeout(500)
+    const dialogs = await visibleAntModalLocators(page)
+    for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+      const dialog = dialogs[index]
+      if (await dialog.locator("textarea").count().catch(() => 0) > 0) {
+        return {
+          opened: true,
+          reason: "ok",
+          dialog
+        }
+      }
+
+      const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+      if (keywordMatch(text, SKU_IMAGE_DIALOG_KEYWORDS) || text.toLowerCase().includes("url")) {
+        return {
+          opened: true,
+          reason: "ok",
+          dialog
+        }
+      }
+    }
+  }
+
+  try {
+    await clickAfterDianxiaomiIdle(page, chooseButton, 2)
+  } catch {
+    const forced = await forceDomClick(chooseButton)
+    if (!forced) {
+      return {
+        opened: false,
+        reason: "sku image choose button click failed",
+        dialog: null as Locator | null
+      }
+    }
+  }
+  await page.waitForTimeout(300)
+
+  const menuItems = page.locator(".ant-dropdown:visible .ant-dropdown-menu-item, .ant-dropdown-menu:visible .ant-dropdown-menu-item, [role='menu']:visible [role='menuitem']")
+  const menuCount = Math.min(await menuItems.count().catch(() => 0), 12)
+  let networkItem: Locator | null = null
+
+  for (let index = 0; index < menuCount; index += 1) {
+    const item = menuItems.nth(index)
+    if (!await item.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const text = cleanVisibleText(await item.innerText().catch(() => ""))
+    if (text.includes("网络") || text.toLowerCase().includes("url")) {
+      networkItem = item
+      break
+    }
+  }
+
+  if (!networkItem && menuCount >= 3) {
+    networkItem = menuItems.nth(2)
+  }
+
+  if (!networkItem) {
+    return {
+      opened: false,
+      reason: "network image menu item not found",
+      dialog: null as Locator | null
+    }
+  }
+
+  try {
+    await clickAfterDianxiaomiIdle(page, networkItem, 2)
+  } catch {
+    const forced = await forceDomClick(networkItem)
+    if (!forced) {
+      return {
+        opened: false,
+        reason: "network image menu item click failed",
+        dialog: null as Locator | null
+      }
+    }
+  }
+  await page.waitForTimeout(500)
+
+  const dialogs = await visibleAntModalLocators(page)
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const dialog = dialogs[index]
+    if (await dialog.locator("textarea").count().catch(() => 0) > 0) {
+      return {
+        opened: true,
+        reason: "ok",
+        dialog
+      }
+    }
+
+    const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+    if (keywordMatch(text, SKU_IMAGE_DIALOG_KEYWORDS) || text.toLowerCase().includes("url")) {
+      return {
+        opened: true,
+        reason: "ok",
+        dialog
+      }
+    }
+  }
+
+  return {
+    opened: false,
+    reason: "network image dialog did not appear",
+    dialog: null as Locator | null
+  }
+}
+
+const submitSkuImageUrlsStable = async (page: Page, dialog: Locator, urls: string[]) => {
+  const input = await firstVisible([
+    dialog.locator("textarea"),
+    dialog.locator("input:not([type='hidden']):not([type='checkbox']):not([type='radio']):not([type='button']):not([type='submit']):not([type='file'])")
+  ])
+  if (!input) {
+    return {
+      added: false,
+      reason: "network image dialog input missing",
+      feedback: null as SubmitFeedback | null
+    }
+  }
+
+  const beforeDialogCount = (await visibleAntModalLocators(page)).length
+  await fillTextField(input, urls.join("\n"))
+
+  const buttons = dialog.locator("button, .ant-btn, [role='button']")
+  const buttonCount = Math.min(await buttons.count().catch(() => 0), 12)
+  let addButton: Locator | null = null
+  for (let index = 0; index < buttonCount; index += 1) {
+    const button = buttons.nth(index)
+    if (!await button.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const text = cleanVisibleText(await button.innerText().catch(() => ""))
+    const className = await button.getAttribute("class").catch(() => "")
+    if (
+      text.includes(SKU_IMAGE_ADD_BUTTON_TEXT)
+      || text.includes(SKU_IMAGE_CONFIRM_TEXT)
+      || text.includes(SKU_IMAGE_CONFIRM_ALT_TEXT)
+      || /\bprimary\b/i.test(className ?? "")
+    ) {
+      addButton = button
+      break
+    }
+  }
+
+  if (!addButton && buttonCount > 0) {
+    addButton = buttons.nth(buttonCount - 1)
+  }
+
+  if (!addButton) {
+    return {
+      added: false,
+      reason: "network image dialog add button missing",
+      feedback: null as SubmitFeedback | null
+    }
+  }
+
+  const previousFeedback = await readSubmitFeedback(page)
+  await clickAfterDianxiaomiIdle(page, addButton, 2)
+  const feedback = await waitForSubmitFeedback(page, 8_000, previousFeedback, 1_500)
+  const dialogClosed = await waitForVisibleAntModalCountAtMost(page, Math.max(0, beforeDialogCount - 1), 8_000)
+
+  if (feedback.state === "failure" && keywordMatch(feedback.message, SKU_IMAGE_DIALOG_FAILURE_KEYWORDS)) {
+    return {
+      added: false,
+      reason: feedback.message || "network image add failed",
+      feedback
+    }
+  }
+
+  return {
+    added: dialogClosed,
+    reason: dialogClosed ? "ok" : "network image dialog remained open",
+    feedback
+  }
+}
+
+const waitForSkuImageCellState = async (
+  page: Page,
+  cell: Locator,
+  predicate: (state: SkuImageCellState) => boolean,
+  timeoutMs = 8_000
+) => {
+  const startedAt = Date.now()
+  let state = await readSkuImageCellState(cell)
+  while (!predicate(state) && Date.now() - startedAt < timeoutMs) {
+    await page.waitForTimeout(400)
+    state = await readSkuImageCellState(cell)
+  }
+  return state
+}
+
+const isStrictSkuImageCellState = (state: SkuImageCellState) =>
+  state.imageCount >= 1
+  && state.imageMeta.length > 0
+  && state.imageMeta.every((image) =>
+    image.aspectRatio !== null
+    && image.aspectRatio >= SKU_IMAGE_STRICT_RATIO_MIN
+    && image.aspectRatio <= SKU_IMAGE_STRICT_RATIO_MAX
+    && image.width >= SKU_IMAGE_MIN_WIDTH_PX
+    && image.height >= SKU_IMAGE_MIN_HEIGHT_PX
+  )
+
+const isSquareSkuImageCellState = (state: SkuImageCellState) =>
+  state.imageCount >= 1
+  && state.imageMeta.length > 0
+  && state.imageMeta.every((image) => isSquareAspectRatio(image.aspectRatio))
+
+const fillSquarePreviewImageLinks = async (page: Page, imageUrls: string[], options: FillSkuImageLinksOptions = {}) => {
+  const {
+    materialImageUrls,
+    probedCandidates,
+    squareCandidates,
+    replacementUrls
+  } = await buildSquarePreviewReplacementUrls(page, imageUrls)
+
+  if (replacementUrls.length === 0) {
+    return stepResult(
+      "fill-sku-image-links",
+      "Fill SKU image links",
+      "failed",
+      "Could not find a compliant square preview image candidate for Dianxiaomi color preview replacement",
+      {
+        mode: "square-preview-all-colors",
+        totalImages: imageUrls.length,
+        materialImageUrls,
+        probedCandidates,
+        squareCandidateCount: squareCandidates.length
+      }
+    )
+  }
+
+  const skuCells = await findSkuImageCells(page, options.maxRows)
+  if (skuCells.length === 0) {
+    return stepResult(
+      "fill-sku-image-links",
+      "Fill SKU image links",
+      "failed",
+      "SKU image cells were not found on the current Dianxiaomi page",
+      {
+        mode: "square-preview-all-colors",
+        totalImages: imageUrls.length,
+        materialImageUrls,
+        probedCandidates,
+        replacementUrls
+      }
+    )
+  }
+
+  const target = skuCells[0]!
+  const sampleTargets = skuCells.slice(0, Math.min(skuCells.length, 4))
+  const beforeSampleStates = await Promise.all(sampleTargets.map(async (sample) => ({
+    rowIndex: sample.rowIndex,
+    rowText: sample.rowText,
+    state: await readSkuImageCellState(sample.cell)
+  })))
+
+  const beforeScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-square-before`,
+    target.rowIndex
+  )
+  const opened = await openSkuImageNetworkDialogStable(page, target.cell)
+  if (!opened.opened || !opened.dialog) {
+    return stepResult(
+      "fill-sku-image-links",
+      "Fill SKU image links",
+      "failed",
+      `Could not open Dianxiaomi network image dialog for square preview replacement: ${opened.reason}`,
+      {
+        mode: "square-preview-all-colors",
+        targetRowIndex: target.rowIndex,
+        targetRowText: target.rowText,
+        replacementUrls,
+        beforeScreenshotPath,
+        beforeSampleStates
+      }
+    )
+  }
+
+  const cleared = await clearSkuImageCellStable(page, target.cell)
+  const afterClearScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-square-after-clear`,
+    target.rowIndex
+  )
+  const submitted = await submitSkuImageUrlsStable(page, opened.dialog, replacementUrls)
+  const afterSubmitScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-square-after-submit`,
+    target.rowIndex
+  )
+
+  const applyAll = submitted.added
+    ? await applySkuImagesToAllColors(page, target.cell)
+    : {
+        applied: false,
+        reason: `network image submit failed: ${submitted.reason}`
+      }
+  const afterApplyAllScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-square-after-apply-all`,
+    target.rowIndex
+  )
+
+  const afterTargetState = await waitForSkuImageCellState(page, target.cell, isSquareSkuImageCellState, 10_000)
+  const sampleResults: Array<Record<string, unknown>> = []
+  let verifiedSampleCount = 0
+
+  for (const sample of sampleTargets) {
+    const state = await waitForSkuImageCellState(page, sample.cell, isSquareSkuImageCellState, 6_000)
+    const square = isSquareSkuImageCellState(state)
+    if (square) {
+      verifiedSampleCount += 1
+    }
+    sampleResults.push({
+      rowIndex: sample.rowIndex,
+      rowText: sample.rowText,
+      square,
+      state
+    })
+  }
+
+  const success =
+    submitted.added
+    && applyAll.applied
+    && isSquareSkuImageCellState(afterTargetState)
+    && verifiedSampleCount === sampleTargets.length
+
+  return stepResult(
+    "fill-sku-image-links",
+    "Fill SKU image links",
+    success ? "done" : "failed",
+    success
+      ? `Applied square preview image replacement to all colors and verified ${verifiedSampleCount} sample row(s)`
+      : `Square preview replacement did not stabilize across sampled color rows (${verifiedSampleCount}/${sampleTargets.length} verified)`,
+    {
+      mode: "square-preview-all-colors",
+      totalImages: imageUrls.length,
+      materialImageUrls,
+      probedCandidates,
+      squareCandidates,
+      replacementUrls,
+      requestedMaxRows: options.maxRows ?? null,
+      skuCellCount: skuCells.length,
+      targetRowIndex: target.rowIndex,
+      targetRowText: target.rowText,
+      beforeSampleStates,
+      cleared,
+      submitted,
+      applyAll,
+      afterTargetState,
+      verifiedSampleCount,
+      sampleTargetCount: sampleTargets.length,
+      sampleResults,
+      beforeScreenshotPath,
+      afterClearScreenshotPath,
+      afterSubmitScreenshotPath,
+      afterApplyAllScreenshotPath
+    }
+  )
+}
+
+export const fillSkuImageLinks = async (page: Page, imageUrls: string[], options: FillSkuImageLinksOptions = {}) => {
+  if (options.mode === "square-preview-all-colors") {
+    return fillSquarePreviewImageLinks(page, imageUrls, options)
+  }
+
+  const probedImages = await probeProductImages(page, imageUrls)
+  const { strict, preferred, selected } = selectSkuImageCandidates(probedImages)
+  const squareCandidates = selectSquareImageCandidates(probedImages)
+  const strictVariantCandidateUrls = Array.from(new Set([
+    ...strict.flatMap((item) => buildStrictSkuNetworkUrls(item)),
+    ...selected.flatMap((item) => buildStrictSkuNetworkUrls(item)),
+    ...squareCandidates.flatMap((item) => buildStrictSkuNetworkUrls(item))
+  ]))
+  const probedStrictVariantCandidates = strictVariantCandidateUrls.length > 0
+    ? await probeProductImages(page, strictVariantCandidateUrls)
+    : []
+  const strictVariantUrls = probedStrictVariantCandidates
+    .filter(isStrictSkuImageCandidate)
+    .sort((left, right) =>
+      skuImageDistanceFromTarget(left) - skuImageDistanceFromTarget(right)
+      || right.height - left.height
+      || right.width - left.width
+    )
+    .map((item) => item.url)
+  const replacementCandidateUrls = strictVariantUrls.length > 0
+    ? strictVariantUrls
+    : selected.map((item) => item.url)
+
+  if (replacementCandidateUrls.length === 0) {
+    return stepResult(
+      "fill-sku-image-links",
+      "Fill SKU image links",
+      "failed",
+      "Could not find enough strict 3:4 SKU image candidates from task product images",
+      {
+        totalImages: imageUrls.length,
+        probedImages,
+        strictCandidateCount: strict.length,
+        strictVariantCandidateUrls,
+        probedStrictVariantCandidates,
+        strictVariantUrls,
+        preferredCount: preferred.length,
+        selectedCount: selected.length,
+        squareCandidateCount: squareCandidates.length
+      }
+    )
+  }
+
+  const skuCells = await findSkuImageCells(page, options.maxRows)
+  if (skuCells.length === 0) {
+    return stepResult(
+      "fill-sku-image-links",
+      "Fill SKU image links",
+      "failed",
+      "SKU image cells were not found on the current Dianxiaomi page",
+      {
+        totalImages: imageUrls.length,
+        probedImages,
+        selectedCandidates: selected
+      }
+    )
+  }
+
+  const urlsForReplacement = fillSkuImageUrlCount(replacementCandidateUrls, Math.max(SKU_IMAGE_MIN_COUNT, 3))
+  const target = skuCells[0]!
+  const sampleTargets = skuCells.slice(0, Math.min(skuCells.length, 4))
+  const beforeSampleStates = await Promise.all(sampleTargets.map(async (sample) => ({
+    rowIndex: sample.rowIndex,
+    rowText: sample.rowText,
+    state: await readSkuImageCellState(sample.cell)
+  })))
+
+  const beforeScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-strict-before`,
+    target.rowIndex
+  )
+  const opened = await openSkuImageNetworkDialogStable(page, target.cell)
+
+  if (!opened.opened || !opened.dialog) {
+    return stepResult(
+      "fill-sku-image-links",
+      "Fill SKU image links",
+      "failed",
+      `Could not open Dianxiaomi network image dialog for strict SKU replacement: ${opened.reason}`,
+      {
+        mode: "strict-color",
+        totalImages: imageUrls.length,
+        probedImages,
+        probedStrictVariantCandidates,
+        strictVariantCandidateUrls,
+        strictVariantUrls,
+        replacementCandidateUrls,
+        urlsForReplacement,
+        targetRowIndex: target.rowIndex,
+        targetRowText: target.rowText,
+        beforeSampleStates,
+        beforeScreenshotPath
+      }
+    )
+  }
+
+  const cleared = await clearSkuImageCellStable(page, target.cell)
+  const afterClearScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-strict-after-clear`,
+    target.rowIndex
+  )
+  const dialogOpenScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-strict-dialog-open`,
+    target.rowIndex
+  )
+  const submitted = await submitSkuImageUrlsStable(page, opened.dialog, urlsForReplacement)
+  const afterSubmitScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-strict-after-submit`,
+    target.rowIndex
+  )
+
+  const applyAll = submitted.added
+    ? await applySkuImagesToAllColors(page, target.cell)
+    : {
+        applied: false,
+        reason: `network image submit failed: ${submitted.reason}`
+      }
+  const afterApplyAllScreenshotPath = await captureSkuRepairScreenshot(
+    page,
+    options.screenshotDir,
+    `${options.screenshotPrefix ?? "fill-sku-image-links"}-strict-after-apply-all`,
+    target.rowIndex
+  )
+
+  const afterTargetState = await waitForSkuImageCellState(page, target.cell, isStrictSkuImageCellState, 12_000)
+  const sampleResults: Array<Record<string, unknown>> = []
+  let verifiedSampleCount = 0
+
+  for (const sample of sampleTargets) {
+    const state = await waitForSkuImageCellState(page, sample.cell, isStrictSkuImageCellState, 8_000)
+    const strictOk = isStrictSkuImageCellState(state)
+    if (strictOk) {
+      verifiedSampleCount += 1
+    }
+    sampleResults.push({
+      rowIndex: sample.rowIndex,
+      rowText: sample.rowText,
+      strictOk,
+      state
+    })
+  }
+
+  const success =
+    submitted.added
+    && applyAll.applied
+    && isStrictSkuImageCellState(afterTargetState)
+    && verifiedSampleCount === sampleTargets.length
+
+  return stepResult(
+    "fill-sku-image-links",
+    "Fill SKU image links",
+    success ? "done" : "failed",
+    success
+      ? `Applied strict SKU image replacement to all colors and verified ${verifiedSampleCount} sample row(s)`
+      : `Strict SKU replacement did not stabilize across sampled color rows (${verifiedSampleCount}/${sampleTargets.length} verified)`,
+    {
+      mode: "strict-color",
+      totalImages: imageUrls.length,
+      probedImages,
+      probedStrictVariantCandidates,
+      selectedCandidates: selected,
+      strictCandidateCount: strict.length,
+      strictVariantCandidateUrls,
+      strictVariantUrls,
+      replacementCandidateUrls,
+      preferredCandidateCount: preferred.length,
+      squareCandidateCount: squareCandidates.length,
+      requestedMaxRows: options.maxRows ?? null,
+      skuCellCount: skuCells.length,
+      urlsForReplacement,
+      targetRowIndex: target.rowIndex,
+      targetRowText: target.rowText,
+      beforeSampleStates,
+      cleared,
+      submitted,
+      applyAll,
+      afterTargetState,
+      verifiedSampleCount,
+      sampleTargetCount: sampleTargets.length,
+      sampleResults,
+      beforeScreenshotPath,
+      afterClearScreenshotPath,
+      dialogOpenScreenshotPath,
+      afterSubmitScreenshotPath,
+      afterApplyAllScreenshotPath
+    }
+  )
+}
+
+const forceDomClick = async (locator: Locator) =>
+  locator.evaluate((element) => {
+    if (element instanceof HTMLElement) {
+      element.click()
+      return true
+    }
+
+    return false
+  }).catch(() => false)
+
+const openDescriptionEditorModal = async (page: Page) => {
+  const beforeCount = (await visibleAntModalLocators(page)).length
+  const directTrigger = page.locator("#wirelessDescBox button, #baiduStatisticsSmtNewEditorEditClickNum button").first()
+  const hasDirectTrigger = await directTrigger.count().catch(() => 0) > 0
+  const trigger = hasDirectTrigger
+    ? directTrigger
+    : await findInteractiveByKeywords(page, DESCRIPTION_EDIT_TRIGGER_KEYWORDS)
+
+  if (!trigger) {
+    return {
+      opened: false,
+      reason: "description edit trigger not found",
+      dialog: null as Locator | null
+    }
+  }
+
+  if (hasDirectTrigger) {
+    await page.locator("#wirelessDescBox").evaluate((element) => {
+      if (element instanceof HTMLElement) {
+        element.scrollIntoView({
+          block: "center"
+        })
+      }
+    }).catch(() => {})
+    await page.waitForTimeout(400)
+  }
+
+  try {
+    await clickAfterDianxiaomiIdle(page, trigger, 2)
+  } catch {
+    const forced = await forceDomClick(trigger)
+    if (!forced) {
+      return {
+        opened: false,
+        reason: "description edit trigger click failed",
+        dialog: null as Locator | null
+      }
+    }
+  }
+
+  await page.waitForTimeout(800)
+  const opened = await page.waitForFunction(
+    (previousCount) => document.querySelectorAll(".ant-modal").length > previousCount,
+    beforeCount,
+    { timeout: 8_000 }
+  ).then(() => true).catch(() => false)
+
+  if (!opened) {
+    return {
+      opened: false,
+      reason: "description editor modal did not appear",
+      dialog: null as Locator | null
+    }
+  }
+
+  const dialogs = await visibleAntModalLocators(page)
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const dialog = dialogs[index]
+    const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+    if (keywordMatch(text, DESCRIPTION_MODAL_KEYWORDS)) {
+      return {
+        opened: true,
+        reason: "ok",
+        dialog
+      }
+    }
+  }
+
+  return {
+    opened: false,
+    reason: "description editor modal not recognized",
+    dialog: null as Locator | null
+  }
+}
+
+const readDescriptionImageModuleState = async (root: Locator): Promise<DescriptionImageModuleState> => {
+  const modules = await root.locator(".smt-desc-content[data-idx]").evaluateAll((nodes) =>
+    nodes.map((node) => {
+      const element = node as HTMLElement
+      const index = Number.parseInt(element.dataset.idx ?? "-1", 10)
+      const image = element.querySelector("img") as HTMLImageElement | null
+      const width = image?.naturalWidth || 0
+      const height = image?.naturalHeight || 0
+      return {
+        index: Number.isFinite(index) ? index : -1,
+        src: image?.getAttribute("src") ?? "",
+        width,
+        height,
+        aspectRatio: width > 0 && height > 0 ? width / height : null
+      }
+    })
+  ).catch(() => [] as DescriptionImageModuleState["modules"])
+
+  return {
+    moduleCount: modules.length,
+    modules
+  }
+}
+
+const collectDescriptionImageModuleTargets = async (dialog: Locator): Promise<DescriptionImageModuleTarget[]> => {
+  const items = dialog.locator(".using-modules-content .using-item.sortable-item")
+  const itemCount = Math.min(await items.count().catch(() => 0), 40)
+  const targets: DescriptionImageModuleTarget[] = []
+
+  for (let index = 0; index < itemCount; index += 1) {
+    const item = items.nth(index)
+    if (!await item.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const dataIndex = await item.getAttribute("data-idx").catch(() => null)
+    const parsedIndex = dataIndex && Number.isFinite(Number(dataIndex)) ? Number(dataIndex) : index
+    const contentImage = dialog.locator(`.smt-desc-content[data-idx="${parsedIndex}"] img`).first()
+    const image = await contentImage.evaluate((node) => {
+      const img = node as HTMLImageElement
+      const width = img.naturalWidth || 0
+      const height = img.naturalHeight || 0
+      return {
+        src: img.getAttribute("src") ?? "",
+        width,
+        height,
+        aspectRatio: width > 0 && height > 0 ? width / height : null
+      }
+    }).catch(() => null as DescriptionImageModuleTarget["image"])
+
+    targets.push({
+      item,
+      index: parsedIndex,
+      image
+    })
+  }
+
+  return targets
+}
+
+const deleteDescriptionImageModule = async (page: Page, target: DescriptionImageModuleTarget) => {
+  const targetImageSrc = target.image?.src ?? ""
+  const descriptionImageCountBefore = await page.locator(".ant-modal.smt-new-editor .smt-desc-content[data-idx] img").count().catch(() => 0)
+
+  await target.item.hover().catch(() => {})
+  await page.waitForTimeout(300)
+
+  let clickedViaHoverDelete = await target.item.evaluate((element) => {
+    const deleteControl = element.querySelector(".icon_delete, [title='删除'], [title*='删除'], [class*='delete'], [class*='remove']")
+    if (!(deleteControl instanceof HTMLElement)) {
+      return false
+    }
+
+    deleteControl.click()
+    return true
+  }).catch(() => false)
+
+  if (!clickedViaHoverDelete) {
+    const fallbackDeleteButton = await firstVisible([
+      target.item.locator(".icon_delete"),
+      target.item.locator("[title*='删除']"),
+      target.item.locator("[class*='delete' i]"),
+      target.item.locator("[class*='remove' i]")
+    ]) ?? await findInteractiveInRootByKeywords(target.item, DESCRIPTION_DELETE_KEYWORDS)
+
+    if (!fallbackDeleteButton) {
+      return {
+        deleted: false,
+        reason: "description module delete button missing"
+      }
+    }
+
+    try {
+      await clickAfterDianxiaomiIdle(page, fallbackDeleteButton, 2)
+      clickedViaHoverDelete = true
+    } catch {
+      const forcedFallbackDelete = await forceDomClick(fallbackDeleteButton)
+      if (!forcedFallbackDelete) {
+        return {
+          deleted: false,
+          reason: "description module delete click failed"
+        }
+      }
+      clickedViaHoverDelete = true
+    }
+  }
+
+  if (!clickedViaHoverDelete) {
+    return {
+      deleted: false,
+      reason: "description module delete click failed"
+    }
+  }
+
+  await page.waitForTimeout(500)
+  const descriptionImageRemoved = await page.waitForFunction(
+    ({ src, before }) => {
+      const images = Array.from(document.querySelectorAll(".ant-modal.smt-new-editor .smt-desc-content[data-idx] img"))
+      const stillHasTarget = src
+        ? images.some((node) => (node as HTMLImageElement).getAttribute("src") === src)
+        : false
+      return src
+        ? !stillHasTarget
+        : images.length < before
+    },
+    {
+      src: targetImageSrc,
+      before: descriptionImageCountBefore
+    },
+    { timeout: 5_000 }
+  ).then(() => true).catch(() => false)
+
+  return {
+    deleted: descriptionImageRemoved,
+    reason: descriptionImageRemoved ? "ok" : "description module image remained after delete"
+  }
+}
+
+const saveDescriptionEditorModal = async (page: Page, dialog: Locator) => {
+  const beforeCount = (await visibleAntModalLocators(page)).length
+  const saveButton = await findInteractiveInRootByKeywords(dialog, DESCRIPTION_MODAL_SAVE_KEYWORDS)
+  if (!saveButton) {
+    return {
+      saved: false,
+      reason: "description modal save button not found"
+    }
+  }
+
+  try {
+    await clickAfterDianxiaomiIdle(page, saveButton, 2)
+  } catch {
+    const forced = await forceDomClick(saveButton)
+    if (!forced) {
+      return {
+        saved: false,
+        reason: "description modal save click failed"
+      }
+    }
+  }
+
+  await page.waitForTimeout(800)
+  const closed = await waitForVisibleAntModalCountAtMost(page, Math.max(0, beforeCount - 1), 10_000)
+  return {
+    saved: closed,
+    reason: closed ? "ok" : "description modal remained open after save"
+  }
+}
+
+export const normalizeDescriptionImageModules = async (page: Page, imageUrls: string[]) => {
+  const probedImages = await probeProductImages(page, imageUrls)
+  const { selected } = selectSkuImageCandidates(probedImages)
+  const opened = await openDescriptionEditorModal(page)
+
+  if (!opened.opened || !opened.dialog) {
+    return stepResult(
+      "normalize-description-image-modules",
+      "Normalize description image modules",
+      "failed",
+      opened.reason,
+      {
+        totalImages: imageUrls.length,
+        probedImages,
+        selectedCandidates: selected
+      }
+    )
+  }
+
+  const dialog = opened.dialog
+  const beforeState = await readDescriptionImageModuleState(dialog)
+  const targets = await collectDescriptionImageModuleTargets(dialog)
+  const removable = targets.filter((target) => {
+    const image = target.image
+    if (!image || !image.src) {
+      return false
+    }
+
+    if (image.aspectRatio === null) {
+      return false
+    }
+
+    const ratioInvalid = image.aspectRatio < DESCRIPTION_IMAGE_RATIO_MIN || image.aspectRatio > DESCRIPTION_IMAGE_RATIO_MAX
+    return ratioInvalid
+  })
+
+  const deletionResults: Array<Record<string, unknown>> = []
+  for (const target of removable.sort((left, right) => right.index - left.index)) {
+    const result = await deleteDescriptionImageModule(page, target)
+    deletionResults.push({
+      index: target.index,
+      image: target.image,
+      ...result
+    })
+  }
+
+  const afterDeleteState = await readDescriptionImageModuleState(dialog)
+  const saveResult = await saveDescriptionEditorModal(page, dialog)
+  const pageDescriptionState = await page.locator(".wirelessDescContentBox, #wirelessDescContentBox, [class*='wirelessDescContentBox']").first().evaluate((root) => {
+    const element = root as HTMLElement | null
+    if (!element) {
+      return {
+        exists: false,
+        imageCount: 0,
+        images: []
+      }
+    }
+
+    const images = Array.from(element.querySelectorAll("img")).map((node) => {
+      const img = node as HTMLImageElement
+      const width = img.naturalWidth || 0
+      const height = img.naturalHeight || 0
+      return {
+        src: img.getAttribute("src") ?? "",
+        width,
+        height,
+        aspectRatio: width > 0 && height > 0 ? width / height : null
+      }
+    })
+
+    return {
+      exists: true,
+      imageCount: images.length,
+      images
+    }
+  }).catch(() => ({
+    exists: false,
+    imageCount: 0,
+    images: []
+  }))
+
+  const failedDeletes = deletionResults.filter((item) => item.deleted !== true).length
+  const deletedCount = deletionResults.filter((item) => item.deleted === true).length
+  const remainingInvalid = (pageDescriptionState.images as Array<{ aspectRatio: number | null }>).filter((image) =>
+    image.aspectRatio !== null
+    && (image.aspectRatio < DESCRIPTION_IMAGE_RATIO_MIN || image.aspectRatio > DESCRIPTION_IMAGE_RATIO_MAX)
+  ).length
+
+  const status: StepStatus =
+    failedDeletes > 0 || !saveResult.saved
+      ? "failed"
+      : deletedCount > 0 || removable.length === 0
+        ? "done"
+        : "skipped"
+
+  return stepResult(
+    "normalize-description-image-modules",
+    "Normalize description image modules",
+    status,
+    failedDeletes > 0
+      ? `Failed to delete ${failedDeletes} invalid description image module(s)`
+      : !saveResult.saved
+        ? "Description image module changes were not saved"
+        : deletedCount > 0
+          ? `Removed ${deletedCount} invalid description image module(s)`
+          : "No invalid description image modules detected",
+    {
+      totalImages: imageUrls.length,
+      probedImages,
+      selectedCandidates: selected,
+      beforeState,
+      removableCount: removable.length,
+      deletionResults,
+      afterDeleteState,
+      saveResult,
+      pageDescriptionState,
+      remainingInvalid
+    }
+  )
+}
+
+const openImageTranslationMenuIfPresent = async (page: Page, root: Locator | null, primaryAction?: Locator | null) => {
+  if (await findVisibleMenuItemByKeywords(page, IMAGE_TRANSLATION_DIRECT_MENU_KEYWORDS)) {
+    return true
+  }
+
+  // The primary button may already have opened a first-level engine menu.
+  // Prefer drilling into that visible menu before toggling the trigger again.
+  const openedEngineMenu = await clickVisibleMenuItemByKeywords(page, IMAGE_TRANSLATION_ALIBABA_ENGINE_MENU_KEYWORDS, 1)
+  if (openedEngineMenu && await findVisibleMenuItemByKeywords(page, IMAGE_TRANSLATION_DIRECT_MENU_KEYWORDS)) {
+    return true
+  }
+
+  const trigger = primaryAction
+    ?? (root
+      ? await findInteractiveInRootByKeywords(root, IMAGE_TRANSLATION_MENU_TRIGGER_KEYWORDS)
+      : null)
+    ?? await findInteractiveByKeywords(page, IMAGE_TRANSLATION_MENU_TRIGGER_KEYWORDS)
+
+  if (!trigger) {
+    return false
+  }
+
+  await clickAfterDianxiaomiIdle(page, trigger, 1)
+  await page.waitForTimeout(400)
+  await clickVisibleMenuItemByKeywords(page, IMAGE_TRANSLATION_ALIBABA_ENGINE_MENU_KEYWORDS, 1)
+  return Boolean(await findVisibleMenuItemByKeywords(page, IMAGE_TRANSLATION_DIRECT_MENU_KEYWORDS))
+}
+
+const completeImageTranslationFinalActionIfPresent = async (page: Page, primaryAction?: Locator | null) => {
+  await page.waitForTimeout(400)
+  const latestDialog = await getLatestImageTranslationDialog(page)
+  if (latestDialog) {
+    await ensureCheckboxNearText(latestDialog, "\u9009\u62e9\u5168\u90e8", true)
+    await ensureCheckboxNearText(latestDialog, "\u5feb\u901f\u7ffb\u8bd1", false)
+  }
+
+  await openImageTranslationMenuIfPresent(page, latestDialog, primaryAction)
+
+  const clickedDirectLanguageAction = await clickVisibleMenuItemByKeywords(page, IMAGE_TRANSLATION_DIRECT_MENU_KEYWORDS, 3)
+  if (!clickedDirectLanguageAction) {
+    return false
+  }
+  await page.waitForTimeout(500)
+
+  const followupStartedAt = Date.now()
+  while (Date.now() - followupStartedAt < 4_000) {
+    const followupDialog = await getLatestImageTranslationDialog(page)
+    if (!followupDialog) {
+      return true
+    }
+
+    const followupText = normalizeFeedbackText(await followupDialog.innerText().catch(() => ""))
+    const requiresLanguageSelection = keywordMatch(followupText, [
+      "\u81ea\u5b9a\u4e49\u7ffb\u8bd1",
+      "\u9ad8\u7ea7\u7ffb\u8bd1",
+      "\u6e90\u8bed\u8a00",
+      "\u76ee\u6807\u8bed\u8a00"
+    ])
+
+    if (!requiresLanguageSelection) {
+      await page.waitForTimeout(250)
+      continue
+    }
+
+    const selects = followupDialog.locator(".ant-select:visible")
+    const sourceSelect = await selects.count().catch(() => 0) > 0 ? selects.nth(0) : null
+    const targetSelect = await selects.count().catch(() => 0) > 1 ? selects.nth(1) : null
+
+    if (sourceSelect) {
+      await selectAntOption(page, sourceSelect, IMAGE_TRANSLATION_SOURCE_LANGUAGE_KEYWORDS, IMAGE_TRANSLATION_SOURCE_LANGUAGE_KEYWORDS[0])
+    }
+
+    if (targetSelect) {
+      await selectAntOption(page, targetSelect, IMAGE_TRANSLATION_TARGET_LANGUAGE_KEYWORDS, IMAGE_TRANSLATION_TARGET_LANGUAGE_KEYWORDS[0])
+    }
+
+    const confirmTranslateButton = await findInteractiveInRootByKeywords(followupDialog, [
+      "\u786e\u5b9a\u7ffb\u8bd1",
+      "\u5f00\u59cb\u7ffb\u8bd1",
+      "\u63d0\u4ea4\u7ffb\u8bd1",
+      "\u7ffb\u8bd1",
+      "translate",
+      "start translation",
+      "confirm translation"
+    ])
+    if (confirmTranslateButton) {
+      await clickAfterDianxiaomiIdle(page, confirmTranslateButton, 1)
+      await page.waitForTimeout(400)
+    }
+
+    return true
+  }
+
+  return true
+}
+
+const finalizeImageTranslationResultIfPresent = async (page: Page) => {
+  let handled = false
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const dialogs = await visibleModalCandidates(page)
+    if (dialogs.length === 0) {
+      return handled
+    }
+
+    const dialogSnapshots: Array<{
+      dialog: Locator
+      text: string
+      looksLikeImageCheckDialog: boolean
+      looksLikeTranslationDialog: boolean
+    }> = []
+    for (const dialog of dialogs) {
+      const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+      const looksLikeImageCheckDialog = Boolean(keywordMatch(text, IMAGE_CHECK_DIALOG_HINT_KEYWORDS))
+      dialogSnapshots.push({
+        dialog,
+        text,
+        looksLikeImageCheckDialog,
+        looksLikeTranslationDialog: !looksLikeImageCheckDialog
+          && Boolean(keywordMatch(text, IMAGE_TRANSLATION_DIALOG_HINT_KEYWORDS))
+      })
+    }
+
+    let acted = false
+    for (let index = dialogSnapshots.length - 1; index >= 0; index -= 1) {
+      const snapshot = dialogSnapshots[index]
+      const overlayAboveTranslation = index === dialogSnapshots.length - 1
+        && !snapshot.looksLikeImageCheckDialog
+        && !snapshot.looksLikeTranslationDialog
+        && dialogSnapshots.slice(0, index).some((item) => item.looksLikeTranslationDialog)
+
+      if (!snapshot.looksLikeTranslationDialog && !overlayAboveTranslation) {
+        continue
+      }
+
+      const action = await findImageTranslationResultAction(snapshot.dialog)
+
+      if (!action) {
+        continue
+      }
+
+      const beforeCount = dialogs.length
+      await clickAfterDianxiaomiIdle(page, action, 1)
+      await page.waitForTimeout(500)
+      await waitForVisibleModalCandidateCountAtMost(page, Math.max(0, beforeCount - 1), 5_000)
+      handled = true
+      acted = true
+      break
+    }
+
+    if (!acted) {
+      return handled
+    }
+  }
+
+  return handled
+}
+
+const findImageOptionsTrigger = async (page: Page) =>
+  await firstCompactInteractiveVisible([
+    page.locator(".img-module .img-options-action-btn.ant-dropdown-trigger"),
+    page.locator(".img-module [class*='dropdown-trigger' i]").filter({ hasText: /编辑图片|批量|crop/i }),
+    page.locator(".img-options-action-btn").filter({ hasText: /编辑图片|批量|crop/i })
+  ])
+  ?? await findInteractiveByKeywords(page, IMAGE_OPTIONS_TRIGGER_KEYWORDS)
+
+const findImageOptionsMenuAction = async (
+  page: Page,
+  keywords: string[]
+) => {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await waitForDianxiaomiLoadingOverlayToClear(page)
+    const existing = await findVisibleMenuItemByKeywords(page, keywords)
+    if (existing) {
+      return existing
+    }
+
+    const trigger = await findImageOptionsTrigger(page).catch(() => null)
+    if (!trigger) {
+      await page.waitForTimeout(500)
+      continue
+    }
+
+    try {
+      await clickAfterDianxiaomiIdle(page, trigger, 1)
+      await page.waitForTimeout(400)
+      const menuAction = await findVisibleMenuItemByKeywords(page, keywords)
+      if (menuAction) {
+        return menuAction
+      }
+    } catch {
+      await page.waitForTimeout(750)
     }
   }
 
@@ -862,7 +6532,11 @@ const collectMediaToolCandidates = async (
 
   for (const tool of DIANXIAOMI_MEDIA_TOOLS) {
     const configuredSelectors = config.mediaTools?.[tool.configKey] ?? []
-    const locator = await findInteractiveByKeywords(page, tool.keywords, configuredSelectors)
+    const imageMenuKeywords = IMAGE_OPTIONS_MENU_KEYWORDS[tool.id]
+    const locator = imageMenuKeywords
+      ? await findImageOptionsMenuAction(page, imageMenuKeywords)
+        ?? await findInteractiveByKeywords(page, tool.keywords, configuredSelectors)
+      : await findInteractiveByKeywords(page, tool.keywords, configuredSelectors)
     const locatorDescriptor = await describeLocator(locator)
     candidates.push({
       ...tool,
@@ -876,17 +6550,13 @@ const collectMediaToolCandidates = async (
 }
 
 const getPageSafetyState = async (page: Page): Promise<PageSafetyState> => {
-  const dialogs = page.locator(BLOCKING_DIALOG_SELECTOR)
-  const dialogCount = Math.min(await dialogs.count().catch(() => 0), 20)
+  const dialogs = await visibleDialogLocators(page)
   const blockingDialogs: LocatorDescriptor[] = []
 
-  for (let index = 0; index < dialogCount; index += 1) {
-    const dialog = dialogs.nth(index)
-    if (await dialog.isVisible().catch(() => false)) {
-      const descriptor = await describeLocator(dialog)
-      if (descriptor) {
-        blockingDialogs.push(descriptor)
-      }
+  for (const dialog of dialogs) {
+    const descriptor = await describeLocator(dialog)
+    if (descriptor) {
+      blockingDialogs.push(descriptor)
     }
   }
 
@@ -897,19 +6567,77 @@ const getPageSafetyState = async (page: Page): Promise<PageSafetyState> => {
   }
 }
 
-const visibleDialogLocators = async (page: Page) => {
-  const dialogs = page.locator(BLOCKING_DIALOG_SELECTOR)
-  const dialogCount = Math.min(await dialogs.count().catch(() => 0), 20)
-  const visibleDialogs: Locator[] = []
+const collectVisibleLocators = async (locator: Locator, maxCount = 20) => {
+  const count = Math.min(await locator.count().catch(() => 0), maxCount)
+  const visibleLocators: Locator[] = []
 
-  for (let index = 0; index < dialogCount; index += 1) {
-    const dialog = dialogs.nth(index)
-    if (await dialog.isVisible().catch(() => false)) {
-      visibleDialogs.push(dialog)
+  for (let index = 0; index < count; index += 1) {
+    const item = locator.nth(index)
+    if (await item.isVisible().catch(() => false)) {
+      visibleLocators.push(item)
     }
   }
 
-  return visibleDialogs
+  return visibleLocators
+}
+
+const visibleDialogLocators = async (page: Page) => {
+  const selectors = [
+    ".ant-modal:visible",
+    ".el-dialog:visible",
+    "[role='dialog']:visible",
+    "[aria-modal='true']:visible",
+    ".modal:visible",
+    "[class*='dialog' i]:visible",
+    "[class*='popup' i]:visible",
+    "[class*='layer' i]:visible",
+    "[class*='drawer' i]:visible",
+    "[class*='overlay' i]:visible"
+  ]
+  const seen = new Set<string>()
+  const dialogs: Locator[] = []
+
+  for (const selector of selectors) {
+    for (const item of await collectVisibleLocators(page.locator(selector))) {
+      if (!await isLikelyDialogContainer(item)) {
+        continue
+      }
+      const key = await locatorIdentityKey(item)
+      if (!key || seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+      dialogs.push(item)
+    }
+  }
+
+  for (const item of await collectLikelyFloatingPanels(page)) {
+    if (!await isLikelyDialogContainer(item)) {
+      continue
+    }
+    const key = await locatorIdentityKey(item)
+    if (!key || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    dialogs.push(item)
+  }
+
+  return dialogs
+}
+
+const waitForVisibleDialogCountAtMost = async (page: Page, maximumVisibleDialogs: number, timeoutMs = 8_000) => {
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if ((await visibleDialogLocators(page)).length <= maximumVisibleDialogs) {
+      return true
+    }
+
+    await page.waitForTimeout(250)
+  }
+
+  return (await visibleDialogLocators(page)).length <= maximumVisibleDialogs
 }
 
 const getLatestMediaSurface = async (page: Page) => {
@@ -920,6 +6648,58 @@ const getLatestMediaSurface = async (page: Page) => {
 const getLatestMediaDialog = async (page: Page) => {
   const dialogs = await visibleDialogLocators(page)
   return dialogs[dialogs.length - 1] ?? null
+}
+
+const getLatestImageTranslationDialog = async (page: Page) => {
+  const dialogs = await visibleDialogLocators(page)
+
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const dialog = dialogs[index]
+    const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+    if (
+      !keywordMatch(text, IMAGE_CHECK_DIALOG_HINT_KEYWORDS)
+      && keywordMatch(text, IMAGE_TRANSLATION_DIALOG_HINT_KEYWORDS)
+    ) {
+      return dialog
+    }
+  }
+
+  return null
+}
+
+const getTopmostOverlayAboveImageTranslation = async (page: Page) => {
+  const dialogs = await visibleModalCandidates(page)
+  if (dialogs.length < 2) {
+    return null
+  }
+
+  const snapshots: Array<{
+    dialog: Locator
+    text: string
+    looksLikeImageCheckDialog: boolean
+    looksLikeTranslationDialog: boolean
+  }> = []
+
+  for (const dialog of dialogs) {
+    const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+    const looksLikeImageCheckDialog = Boolean(keywordMatch(text, IMAGE_CHECK_DIALOG_HINT_KEYWORDS))
+    snapshots.push({
+      dialog,
+      text,
+      looksLikeImageCheckDialog,
+      looksLikeTranslationDialog: !looksLikeImageCheckDialog
+        && Boolean(keywordMatch(text, IMAGE_TRANSLATION_DIALOG_HINT_KEYWORDS))
+    })
+  }
+
+  const top = snapshots[snapshots.length - 1] ?? null
+  if (!top || top.looksLikeImageCheckDialog || top.looksLikeTranslationDialog) {
+    return null
+  }
+
+  return snapshots.slice(0, -1).some((item) => item.looksLikeTranslationDialog)
+    ? top
+    : null
 }
 
 const findInteractiveInRootByKeywords = async (root: Page | Locator, keywords: string[]) => {
@@ -945,6 +6725,201 @@ const findInteractiveInRootByKeywords = async (root: Page | Locator, keywords: s
   }
 
   return null
+}
+
+const findLastVisibleActionInRoot = async (root: Locator, maxCount = 20) => {
+  const actions = root.locator("button, [role='button'], input[type='button'], input[type='submit']")
+  const count = Math.min(await actions.count().catch(() => 0), maxCount)
+
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const action = actions.nth(index)
+    if (!await action.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const text = cleanVisibleText(await action.innerText().catch(async () => await action.getAttribute("value").catch(() => "")))
+    if (!text) {
+      continue
+    }
+
+    return action
+  }
+
+  return null
+}
+
+const IMAGE_TRANSLATION_RESULT_NON_FINAL_ACTION_KEYWORDS = [
+  "译图",
+  "原图",
+  "选择全部",
+  "快速翻译",
+  "保留原图",
+  "强制识别"
+]
+
+const findImageTranslationResultAction = async (root: Locator, maxCount = 24) => {
+  const directConfirm = await findInteractiveInRootByKeywords(root, IMAGE_TRANSLATION_RESULT_CONFIRM_KEYWORDS)
+  if (directConfirm) {
+    return directConfirm
+  }
+
+  const directClose = await firstVisible([
+    root.locator("[aria-label*='close' i]"),
+    root.locator("[title*='close' i]"),
+    root.locator(".ant-modal-close, .el-dialog__headerbtn, .modal-close, [class*='close' i]")
+  ])
+  if (directClose) {
+    return directClose
+  }
+
+  const actions = root.locator("button, [role='button'], input[type='button'], input[type='submit'], a[role='button']")
+  const count = Math.min(await actions.count().catch(() => 0), maxCount)
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const action = actions.nth(index)
+    if (!await action.isVisible().catch(() => false)) {
+      continue
+    }
+
+    const text = cleanVisibleText(
+      await action.innerText().catch(async () => await action.getAttribute("value").catch(() => ""))
+    )
+    if (!text) {
+      continue
+    }
+
+    if (keywordMatch(text, IMAGE_TRANSLATION_RESULT_NON_FINAL_ACTION_KEYWORDS)) {
+      continue
+    }
+
+    return action
+  }
+
+  return findInteractiveInRootByKeywords(root, MEDIA_CLOSE_KEYWORDS)
+}
+
+type DianxiaomiSubmitClickResult = {
+  clickedButton: boolean
+  clickedMenuAction: boolean
+  menuActionText: string | null
+  menuVisibleAfterButton: boolean
+}
+
+const SUBMIT_MENU_ACTION_KEYWORDS = [
+  "\u4fdd\u5b58\u5e76\u53d1\u5e03",
+  "\u7acb\u5373\u53d1\u5e03",
+  "\u786e\u8ba4\u53d1\u5e03",
+  "\u53d1\u5e03",
+  "\u63d0\u4ea4",
+  "\u520a\u767b",
+  "\u7acb\u5373\u520a\u767b",
+  "publish",
+  "submit"
+]
+
+const readLocatorCompactText = async (locator: Locator | null) =>
+  locator ? cleanVisibleText(await locator.innerText().catch(() => "")) : ""
+
+const visibleSubmitMenuRoots = async (page: Page) => {
+  const roots = page.locator([
+    ".ant-dropdown:visible",
+    ".ant-dropdown-menu:visible",
+    ".el-dropdown-menu:visible",
+    "[role='menu']:visible"
+  ].join(", "))
+  const rootCount = Math.min(await roots.count().catch(() => 0), 8)
+  const visibleRoots: Locator[] = []
+
+  for (let index = 0; index < rootCount; index += 1) {
+    const root = roots.nth(index)
+    if (await root.isVisible().catch(() => false)) {
+      visibleRoots.push(root)
+    }
+  }
+
+  return visibleRoots
+}
+
+const findSubmitMenuAction = async (page: Page) => {
+  const deadline = Date.now() + 2_500
+
+  while (Date.now() < deadline) {
+    const roots = await visibleSubmitMenuRoots(page)
+    for (const root of roots) {
+      const keywordMatchAction = await findInteractiveInRootByKeywords(root, SUBMIT_MENU_ACTION_KEYWORDS)
+      if (keywordMatchAction && await keywordMatchAction.isVisible().catch(() => false)) {
+        return keywordMatchAction
+      }
+
+      const fallbackItems = root.locator("[role='menuitem'], .ant-dropdown-menu-item, .el-dropdown-menu__item, li, button, a").filter({
+        hasText: /\S/
+      })
+      const fallbackCount = Math.min(await fallbackItems.count().catch(() => 0), 10)
+      for (let index = 0; index < fallbackCount; index += 1) {
+        const item = fallbackItems.nth(index)
+        if (await item.isVisible().catch(() => false)) {
+          return item
+        }
+      }
+    }
+
+    await page.waitForTimeout(200)
+  }
+
+  return null
+}
+
+const clickDianxiaomiSubmitAction = async (
+  page: Page,
+  config: DianxiaomiSelectorConfig
+): Promise<DianxiaomiSubmitClickResult> => {
+  const result: DianxiaomiSubmitClickResult = {
+    clickedButton: false,
+    clickedMenuAction: false,
+    menuActionText: null,
+    menuVisibleAfterButton: false
+  }
+
+  const configured = await findByConfiguredSelectors(page, config.buttons?.submit)
+  const submitButton = configured ?? await findButtonByKeywords(page, ["\u53d1\u5e03", "\u63d0\u4ea4", "\u7acb\u5373\u520a\u767b", "submit", "publish"], config.buttons?.submit)
+  if (!submitButton) {
+    return result
+  }
+
+  await submitButton.click()
+  result.clickedButton = true
+  await page.waitForTimeout(350)
+
+  const menuAction = await findSubmitMenuAction(page)
+  result.menuVisibleAfterButton = (await visibleSubmitMenuRoots(page)).length > 0
+  if (menuAction) {
+    result.menuActionText = await readLocatorCompactText(menuAction)
+    await menuAction.click()
+    result.clickedMenuAction = true
+    await page.waitForTimeout(500)
+  }
+
+  return result
+}
+
+const clickDianxiaomiSubmitMenuActionIfPresent = async (page: Page) => {
+  const menuAction = await findSubmitMenuAction(page)
+  const menuVisibleAfterButton = (await visibleSubmitMenuRoots(page)).length > 0
+  if (!menuAction) {
+    return {
+      clickedMenuAction: false,
+      menuActionText: null,
+      menuVisibleAfterButton
+    }
+  }
+
+  const menuActionText = await readLocatorCompactText(menuAction)
+  await menuAction.click()
+  await page.waitForTimeout(500)
+  return {
+    clickedMenuAction: true,
+    menuActionText,
+    menuVisibleAfterButton
+  }
 }
 
 const SUBMIT_SUCCESS_KEYWORDS = [
@@ -983,6 +6958,47 @@ const SUBMIT_FAILURE_KEYWORDS = [
   "required"
 ]
 
+SUBMIT_SUCCESS_KEYWORDS.push(
+  "\u53d1\u5e03\u6210\u529f",
+  "\u63d0\u4ea4\u6210\u529f",
+  "\u520a\u767b\u6210\u529f",
+  "\u5df2\u63d0\u4ea4",
+  "\u5df2\u53d1\u5e03",
+  "\u63d0\u4ea4\u81f3\u5e73\u53f0",
+  "\u5ba1\u6838\u4e2d",
+  "\u5f85\u5ba1\u6838",
+  "\u5f85\u6838\u4ef7",
+  "\u6838\u4ef7",
+  "\u4e0a\u67b6\u5ba1\u6838"
+)
+
+SUBMIT_FAILURE_KEYWORDS.push(
+  "\u53d1\u5e03\u5931\u8d25",
+  "\u63d0\u4ea4\u5931\u8d25",
+  "\u520a\u767b\u5931\u8d25",
+  "\u5931\u8d25",
+  "\u9519\u8bef",
+  "\u5f02\u5e38",
+  "\u8bf7\u5b8c\u5584",
+  "\u4e0d\u80fd\u4e3a\u7a7a",
+  "\u5fc5\u586b",
+  "\u4e0d\u7b26\u5408",
+  "\u6821\u9a8c",
+  "\u91cd\u590d",
+  "\u8d85\u65f6",
+  "\u8bf7\u9009\u62e9",
+  "\u8bf7\u586b\u5199"
+)
+
+const WEAK_BODY_SUBMIT_FAILURE_KEYWORDS = new Set([
+  "required",
+  "\u8bf7\u5b8c\u5584",
+  "\u4e0d\u80fd\u4e3a\u7a7a",
+  "\u5fc5\u586b",
+  "\u8bf7\u9009\u62e9",
+  "\u8bf7\u586b\u5199"
+].map((keyword) => keyword.toLowerCase()))
+
 const SUBMIT_CONFIRM_KEYWORDS = [
   "确定",
   "确认",
@@ -998,11 +7014,73 @@ const SUBMIT_CONFIRM_KEYWORDS = [
   "submit"
 ]
 
+// P0-C: save-draft feedback keywords. Sourced from Dianxiaomi's typical toast
+// / inline confirmation after clicking 保存草稿. Intentionally narrower than
+// submit because the success surface is more local (no "submitted" / "under
+// review" noise).
+const SAVE_DRAFT_SUCCESS_KEYWORDS = [
+  "保存成功",
+  "已存为草稿",
+  "草稿已保存",
+  "已保存",
+  "保存为草稿",
+  "\u7f16\u8f91\u6210\u529f",
+  "\u4ea7\u54c1\u7f16\u8f91\u6210\u529f",
+  "\u60a8\u7684\u4ea7\u54c1\u7f16\u8f91\u6210\u529f",
+  "draft saved",
+  "saved as draft",
+  "saved successfully",
+  "save success"
+]
+
+const SAVE_DRAFT_FAILURE_KEYWORDS = [
+  "保存失败",
+  "草稿保存失败",
+  "保存出错",
+  "保存异常",
+  "閿欒",
+  "璇峰畬鍠?",
+  "涓嶈兘涓虹┖",
+  "蹇呭～",
+  "璇烽€夋嫨",
+  "璇峰～鍐?",
+  "save failed",
+  "draft save failed",
+  "save error",
+  "error",
+  "required",
+  "please select",
+  "please fill"
+]
+
+SAVE_DRAFT_FAILURE_KEYWORDS.push(
+  "\u9519\u8bef",
+  "\u8bf7\u5b8c\u5584",
+  "\u4e0d\u80fd\u4e3a\u7a7a",
+  "\u5fc5\u586b",
+  "\u8bf7\u9009\u62e9",
+  "\u8bf7\u586b\u5199"
+)
+
+const WEAK_BODY_SAVE_DRAFT_FAILURE_KEYWORDS = new Set([
+  "required",
+  "please select",
+  "please fill",
+  "\u8bf7\u5b8c\u5584",
+  "\u4e0d\u80fd\u4e3a\u7a7a",
+  "\u5fc5\u586b",
+  "\u8bf7\u9009\u62e9",
+  "\u8bf7\u586b\u5199"
+].map((keyword) => keyword.toLowerCase()))
+
 const MEDIA_APPLY_SUCCESS_KEYWORDS = [
   "\u5904\u7406\u6210\u529f",
   "\u5e94\u7528\u6210\u529f",
   "\u4fdd\u5b58\u6210\u529f",
   "\u7ffb\u8bd1\u6210\u529f",
+  "\u751f\u6210\u6210\u529f",
+  "\u5df2\u751f\u6210",
+  "\u6539\u56fe\u6210\u529f",
   "\u5df2\u5e94\u7528",
   "\u5df2\u4fdd\u5b58",
   "\u5df2\u5b8c\u6210",
@@ -1021,6 +7099,9 @@ const MEDIA_APPLY_FAILURE_KEYWORDS = [
   "\u5e94\u7528\u5931\u8d25",
   "\u4fdd\u5b58\u5931\u8d25",
   "\u7ffb\u8bd1\u5931\u8d25",
+  "\u6682\u4e0d\u53ef\u7528",
+  "\u6682\u65f6\u4e0d\u53ef\u7528",
+  "\u6682\u65e0\u53ef\u7528",
   "\u5931\u8d25",
   "\u9519\u8bef",
   "\u5f02\u5e38",
@@ -1029,8 +7110,12 @@ const MEDIA_APPLY_FAILURE_KEYWORDS = [
   "\u4e0d\u652f\u6301",
   "\u4e0d\u7b26\u5408",
   "\u8d85\u65f6",
-  "\u5c3a\u5bf8",
-  "\u5927\u5c0f",
+  "\u751f\u6210\u5931\u8d25",
+  "\u5c3a\u5bf8\u4e0d\u80fd",
+  "\u4e0d\u80fd\u5c0f\u4e8e",
+  "\u4e0d\u80fd\u5927\u4e8e",
+  "\u592a\u5c0f",
+  "\u592a\u5927",
   "\u56fe\u7247\u4e0d\u5408\u89c4",
   "\u5fc5\u586b",
   "failed",
@@ -1068,13 +7153,29 @@ const MEDIA_INVALID_FAILURE_KEYWORDS = [
   "\u65e0\u6548",
   "\u4e0d\u7b26\u5408",
   "\u4e0d\u5408\u89c4",
-  "\u5c3a\u5bf8",
-  "\u5927\u5c0f",
   "invalid",
   "too large",
-  "too small",
-  "size",
-  "dimension"
+  "too small"
+]
+
+const MEDIA_STORAGE_QUOTA_FAILURE_KEYWORDS = [
+  "\u56fe\u7247\u7a7a\u95f4\u4e0d\u8db3",
+  "\u7a7a\u95f4\u4e0d\u8db3",
+  "\u6682\u65e0\u53ef\u7528\u56fe\u7247\u6570",
+  "\u6682\u65e0\u53ef\u7528\u56fe\u7247\u7ffb\u8bd1\u6570",
+  "\u6682\u65e0\u53ef\u7528\u6b21\u6570",
+  "\u56fe\u7247\u7ffb\u8bd1\u529f\u80fd\u6682\u4e0d\u53ef\u7528",
+  "\u7ffb\u8bd1\u529f\u80fd\u6682\u4e0d\u53ef\u7528",
+  "\u56fe\u7247\u7ffb\u8bd1\u6682\u4e0d\u53ef\u7528",
+  "\u6682\u4e0d\u53ef\u4f7f\u7528",
+  "\u524d\u5f80\u5145\u503c",
+  "\u8d2d\u4e70\u7a7a\u95f4",
+  "image space",
+  "storage quota",
+  "temporarily unavailable",
+  "translation unavailable",
+  "quota exceeded",
+  "insufficient storage"
 ]
 
 const MEDIA_MISSING_INPUT_FAILURE_KEYWORDS = [
@@ -1090,6 +7191,19 @@ const MEDIA_UNSUPPORTED_FAILURE_KEYWORDS = [
   "unsupported",
   "not supported"
 ]
+
+const IMAGE_TRANSLATION_QUOTA_PATTERN = /\u53ef\u7528\u56fe\u7247\u7ffb\u8bd1\u6570(?:\u91cf)?[:：]?\s*(\d+(?:\.\d+)?)/i
+
+const extractImageTranslationQuotaCount = (text: string) => {
+  const normalized = normalizeFeedbackText(text)
+  const matched = normalized.match(IMAGE_TRANSLATION_QUOTA_PATTERN)
+  if (!matched) {
+    return null
+  }
+
+  const parsed = Number(matched[1])
+  return Number.isFinite(parsed) ? parsed : null
+}
 
 const classifyMediaFailure = (message: string, fallback: MediaFailureKind = "unknown"): {
   failureKind: MediaFailureKind
@@ -1108,6 +7222,13 @@ const classifyMediaFailure = (message: string, fallback: MediaFailureKind = "unk
   if (includesAny(MEDIA_INVALID_FAILURE_KEYWORDS)) {
     return {
       failureKind: "invalid-media",
+      retryable: false
+    }
+  }
+
+  if (includesAny(MEDIA_STORAGE_QUOTA_FAILURE_KEYWORDS)) {
+    return {
+      failureKind: "storage-quota",
       retryable: false
     }
   }
@@ -1164,9 +7285,127 @@ const SUBMIT_FEEDBACK_SELECTORS = [
 const normalizeFeedbackText = (value: string) =>
   value.replace(/\s+/g, " ").trim().slice(0, 500)
 
+const isColorSkcLimitSaveFailure = (message: string) => {
+  const normalized = normalizeFeedbackText(message)
+  return /20\s*个\s*颜色\s*skc/i.test(normalized)
+    || (normalized.includes("颜色skc") && normalized.includes("20"))
+    || (normalized.toLowerCase().includes("color skc") && normalized.includes("20"))
+}
+
+const isSiteWarehouseSaveFailure = (message: string) => {
+  const normalized = normalizeFeedbackText(message)
+  return normalized.includes(SITE_WAREHOUSE_REQUIRED_TEXT)
+    || (normalized.includes(SITE_WAREHOUSE_LABEL_TEXT) && normalized.includes(SELECT_PLACEHOLDER_TEXT))
+}
+
+const isShipmentPromiseSaveFailure = (message: string) => {
+  const normalized = normalizeFeedbackText(message)
+  return normalized.includes(SHIPMENT_PROMISE_REQUIRED_TEXT)
+    || normalized.includes(SHIPMENT_PROMISE_LABEL_TEXT)
+}
+
+const isFreightTemplateSaveFailure = (message: string) => {
+  const normalized = normalizeFeedbackText(message)
+  return normalized.includes(FREIGHT_TEMPLATE_REQUIRED_TEXT)
+    || (normalized.includes(FREIGHT_TEMPLATE_LABEL_TEXT) && normalized.includes(SELECT_PLACEHOLDER_TEXT))
+}
+
 const keywordMatch = (text: string, keywords: string[]) => {
   const normalized = text.toLowerCase()
   return keywords.find((keyword) => normalized.includes(keyword.toLowerCase())) ?? null
+}
+
+const parseImageTranslationFeedback = (text: string) => {
+  const normalized = normalizeFeedbackText(text)
+  const resultMatch = normalized.match(IMAGE_TRANSLATION_RESULT_PATTERN)
+  const statusMatch = normalized.match(IMAGE_TRANSLATION_STATUS_PATTERN)
+  const successCount = resultMatch ? Number(resultMatch[1]) : null
+  const failureCount = resultMatch ? Number(resultMatch[2]) : null
+  const statusText = statusMatch?.[1] ?? ""
+  const inProgress = statusText.includes("\u8fdb\u884c\u4e2d") || normalized.includes("\u8fdb\u884c\u4e2d")
+  const mentionsTranslationSummary = successCount !== null || failureCount !== null || normalized.includes("\u7ffb\u8bd1\u6210\u529f") || normalized.includes("\u7ffb\u8bd1\u5931\u8d25")
+
+  return {
+    normalized,
+    successCount,
+    failureCount,
+    statusText,
+    inProgress,
+    mentionsTranslationSummary
+  }
+}
+
+const interpretImageTranslationFeedback = (texts: Array<{ source: string; text: string }>): MediaApplyFeedback | null => {
+  for (const item of texts) {
+    const parsed = parseImageTranslationFeedback(item.text)
+    if (!parsed.mentionsTranslationSummary) {
+      continue
+    }
+
+    if (parsed.successCount !== null && parsed.failureCount !== null) {
+      if (parsed.inProgress) {
+        return {
+          state: "unknown",
+          message: parsed.normalized,
+          source: item.source
+        }
+      }
+
+      if (parsed.failureCount === 0 && parsed.successCount >= 0) {
+        return {
+          state: "success",
+          message: parsed.normalized,
+          source: item.source
+        }
+      }
+
+      return {
+        state: "failure",
+        message: parsed.normalized,
+        source: item.source
+      }
+    }
+
+    if (parsed.inProgress) {
+      return {
+        state: "unknown",
+        message: parsed.normalized,
+        source: item.source
+      }
+    }
+  }
+
+  return null
+}
+
+const interpretImageTranslationOverlayFeedback = async (page: Page): Promise<MediaApplyFeedback | null> => {
+  const overlay = await getTopmostOverlayAboveImageTranslation(page)
+  if (!overlay) {
+    return null
+  }
+
+  const matchedFailureKeyword = keywordMatch(overlay.text, MEDIA_APPLY_FAILURE_KEYWORDS)
+  const classifiedFailure = classifyMediaFailure(overlay.text, "unknown")
+  if (matchedFailureKeyword || classifiedFailure.failureKind !== "unknown") {
+    return {
+      state: "failure",
+      message: overlay.text,
+      source: "translation-result-overlay"
+    }
+  }
+
+  const overlayAction = await findInteractiveInRootByKeywords(overlay.dialog, IMAGE_TRANSLATION_RESULT_CONFIRM_KEYWORDS)
+    ?? await findLastVisibleActionInRoot(overlay.dialog)
+    ?? await findInteractiveInRootByKeywords(overlay.dialog, MEDIA_CLOSE_KEYWORDS)
+  if (!overlayAction) {
+    return null
+  }
+
+  return {
+    state: "success",
+    message: overlay.text || "image translation result confirmation is ready",
+    source: "translation-result-overlay"
+  }
 }
 
 const focusBodyFeedbackText = (text: string, matchedKeyword: string, source: string) => {
@@ -1219,12 +7458,31 @@ const collectFeedbackTexts = async (page: Page) => {
       }
 
       const text = normalizeFeedbackText(await item.innerText().catch(() => ""))
-      if (text) {
-        texts.push({
-          source: selector,
-          text
-        })
+      if (!text || text === "×") {
+        continue
       }
+
+      const className = await item.evaluate((element) => element.getAttribute("class") ?? "").catch(() => "")
+      const normalizedClassName = className.toLowerCase()
+      const genericSuccessSelector = selector === ".success" || selector === "[class*='success' i]"
+      if (
+        genericSuccessSelector
+        && (
+          normalizedClassName.includes("ant-form-item-has-success")
+          || normalizedClassName.includes("ant-select-status-success")
+          || (
+            normalizedClassName.includes("success")
+            && !/(message|toast|notification|notice|alert|status|result)/i.test(className)
+          )
+        )
+      ) {
+        continue
+      }
+
+      texts.push({
+        source: selector,
+        text
+      })
     }
   }
 
@@ -1240,11 +7498,37 @@ const collectFeedbackTexts = async (page: Page) => {
 }
 
 const readSubmitFeedback = async (page: Page): Promise<SubmitFeedback> => {
+  const latestModal = (await visibleAntModalLocators(page)).at(-1) ?? null
+  if (latestModal) {
+    const modalText = normalizeFeedbackText(await latestModal.innerText().catch(() => ""))
+    const modalFailureKeyword = keywordMatch(modalText, SUBMIT_FAILURE_KEYWORDS)
+    if (modalFailureKeyword) {
+      return {
+        state: "failure",
+        message: modalText,
+        source: "ant-modal"
+      }
+    }
+
+    const modalSuccessKeyword = keywordMatch(modalText, SUBMIT_SUCCESS_KEYWORDS)
+    if (modalSuccessKeyword) {
+      return {
+        state: "success",
+        message: modalText,
+        source: "ant-modal"
+      }
+    }
+  }
+
   const texts = await collectFeedbackTexts(page)
 
   for (const item of texts) {
     const matchedKeyword = keywordMatch(item.text, SUBMIT_FAILURE_KEYWORDS)
     if (matchedKeyword) {
+      if (item.source === "body" && WEAK_BODY_SUBMIT_FAILURE_KEYWORDS.has(matchedKeyword.toLowerCase())) {
+        continue
+      }
+
       return {
         state: "failure",
         message: focusBodyFeedbackText(item.text, matchedKeyword, item.source),
@@ -1277,7 +7561,398 @@ const sameSubmitFeedback = (left: SubmitFeedback, right: SubmitFeedback | null |
   && left.source === right?.source
   && left.message === right?.message
 
-const readMediaApplyFeedback = async (page: Page, root: Locator | null): Promise<MediaApplyFeedback> => {
+// P0-C: page-body feedback reader for save-draft. Reuses the same selector
+// set as submit (toast / alert / message classes) but matches against
+// save-draft-specific keywords so the two feedback surfaces don't false-
+// trigger each other.
+const readSaveDraftFeedback = async (page: Page): Promise<SubmitFeedback> => {
+  const latestModal = (await visibleAntModalLocators(page)).at(-1) ?? null
+  if (latestModal) {
+    const modalText = normalizeFeedbackText(await latestModal.innerText().catch(() => ""))
+    const modalFailureKeyword = keywordMatch(modalText, SAVE_DRAFT_FAILURE_KEYWORDS)
+    if (modalFailureKeyword) {
+      return {
+        state: "failure",
+        message: modalText,
+        source: "ant-modal"
+      }
+    }
+
+    const modalSuccessKeyword = keywordMatch(modalText, SAVE_DRAFT_SUCCESS_KEYWORDS)
+    if (modalSuccessKeyword) {
+      return {
+        state: "success",
+        message: modalText,
+        source: "ant-modal"
+      }
+    }
+  }
+
+  const texts = await collectFeedbackTexts(page)
+
+  for (const item of texts) {
+    const matchedKeyword = keywordMatch(item.text, SAVE_DRAFT_FAILURE_KEYWORDS)
+    if (matchedKeyword) {
+      if (item.source === "body" && WEAK_BODY_SAVE_DRAFT_FAILURE_KEYWORDS.has(matchedKeyword.toLowerCase())) {
+        continue
+      }
+
+      return {
+        state: "failure",
+        message: focusBodyFeedbackText(item.text, matchedKeyword, item.source),
+        source: item.source
+      }
+    }
+  }
+
+  for (const item of texts) {
+    const matchedKeyword = keywordMatch(item.text, SAVE_DRAFT_SUCCESS_KEYWORDS)
+    if (matchedKeyword) {
+      return {
+        state: "success",
+        message: focusBodyFeedbackText(item.text, matchedKeyword, item.source),
+        source: item.source
+      }
+    }
+  }
+
+  return {
+    state: "unknown",
+    message: texts[0]?.text ?? "",
+    source: texts[0]?.source ?? "none"
+  }
+}
+
+const sameSaveDraftFeedback = (left: SubmitFeedback, right: SubmitFeedback | null | undefined) =>
+  Boolean(right)
+  && left.state === right?.state
+  && left.source === right?.source
+  && left.message === right?.message
+
+const waitForSaveDraftFeedback = async (
+  page: Page,
+  timeoutMs = 8_000,
+  previousFeedback?: SubmitFeedback | null,
+  duplicateFailureGraceMs = 2_500
+): Promise<SubmitFeedback> => {
+  const startedAt = Date.now()
+  let latest: SubmitFeedback = {
+    state: "unknown",
+    message: "",
+    source: "none"
+  }
+
+  while (Date.now() - startedAt < timeoutMs) {
+    latest = await readSaveDraftFeedback(page)
+    if (latest.state !== "unknown") {
+      if (!sameSaveDraftFeedback(latest, previousFeedback) || Date.now() - startedAt >= duplicateFailureGraceMs) {
+        return latest
+      }
+    }
+
+    await page.waitForTimeout(500)
+  }
+
+  return latest
+}
+
+// P0-D: feedback reader for instant-action tools (image-translation,
+// image-management). Operates on the page body only — no dialog root — and
+// matches against MEDIA_INSTANT_*_KEYWORDS so the surface is scoped to
+// instant actions and won't false-trigger on submit / save-draft keywords.
+const COLLECT_PAGE_VALIDATION_SUMMARY_SCRIPT = `(() => {
+  const normalize = (value) => (value ?? "").replace(/\\s+/g, " ").trim()
+  const isVisible = (element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false
+    }
+
+    const style = window.getComputedStyle(element)
+    const rect = element.getBoundingClientRect()
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+  }
+
+  const rectOf = (element) => {
+    const rect = element.getBoundingClientRect()
+    return {
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    }
+  }
+
+  const issues = Array.from(document.querySelectorAll(".ant-form-item-has-error, .el-form-item.is-error"))
+    .filter(isVisible)
+    .slice(0, 200)
+    .map((item) => ({
+      label: normalize(item.querySelector(".ant-form-item-label, .el-form-item__label")?.textContent),
+      text: normalize(item.textContent).slice(0, 400),
+      explain: Array.from(item.querySelectorAll(".ant-form-item-explain-error, .el-form-item__error"))
+        .filter(isVisible)
+        .map((node) => normalize(node.textContent))
+        .filter(Boolean)
+        .slice(0, 8),
+      inputs: Array.from(item.querySelectorAll("input, textarea"))
+        .filter(isVisible)
+        .slice(0, 10)
+        .map((node) => ({
+          name: normalize(node.getAttribute("name")),
+          placeholder: normalize(node.getAttribute("placeholder")),
+          value: normalize(node.value),
+          className: normalize(node.getAttribute("class"))
+        })),
+      selects: Array.from(item.querySelectorAll(".ant-select"))
+        .filter(isVisible)
+        .slice(0, 6)
+        .map((node) => normalize(node.textContent))
+        .filter(Boolean),
+      rect: rectOf(item)
+    }))
+
+  const warningTexts = Array.from(document.querySelectorAll("body *"))
+    .filter(isVisible)
+    .map((node) => normalize(node.textContent))
+    .filter((text) =>
+      Boolean(text)
+      && text.length <= 160
+      && (
+        text.includes("请选择")
+        || text.includes("请填写")
+        || text.includes("不能包含中文")
+        || text.includes("含有中文")
+        || text.includes("错误")
+        || text.includes("请检查")
+        || text.includes("必填")
+      )
+    )
+    .slice(0, 120)
+
+  const toastTexts = Array.from(document.querySelectorAll(".ant-message, .ant-notification, [class*='message' i], [class*='notification' i]"))
+    .filter(isVisible)
+    .map((node) => normalize(node.textContent))
+    .filter(Boolean)
+    .slice(0, 20)
+
+  return {
+    issueCount: issues.length,
+    issues,
+    warningTexts,
+    toastTexts
+  }
+})()`
+
+const collectPageValidationSummary = async (page: Page): Promise<PageValidationSummary> =>
+  page.evaluate(COLLECT_PAGE_VALIDATION_SUMMARY_SCRIPT) as Promise<PageValidationSummary>
+
+const SAVE_SUCCESS_MODAL_HINT_KEYWORDS = [
+  "\u6d88\u606f\u63d0\u793a",
+  "\u4ea7\u54c1\u7f16\u8f91\u6210\u529f",
+  "\u60a8\u7684\u4ea7\u54c1\u7f16\u8f91\u6210\u529f",
+  "\u521b\u5efa\u65b0\u4ea7\u54c1",
+  "\u7ee7\u7eed\u7f16\u8f91",
+  "message",
+  "success",
+  "continue editing"
+]
+
+const dismissSaveSuccessModalIfPresent = async (page: Page) => {
+  const dialogs = await visibleModalCandidates(page)
+  let dialog: Locator | null = null
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const candidate = dialogs[index]
+    const text = normalizeFeedbackText(await candidate.innerText().catch(() => ""))
+    if (
+      keywordMatch(text, [...SAVE_DRAFT_SUCCESS_KEYWORDS, ...SUBMIT_SUCCESS_KEYWORDS])
+      || keywordMatch(text, SAVE_SUCCESS_MODAL_HINT_KEYWORDS)
+    ) {
+      dialog = candidate
+      break
+    }
+  }
+  if (!dialog) {
+    return {
+      matched: false,
+      dismissed: false,
+      dialogText: ""
+    }
+  }
+
+  const dialogText = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+  if (
+    !keywordMatch(dialogText, [...SAVE_DRAFT_SUCCESS_KEYWORDS, ...SUBMIT_SUCCESS_KEYWORDS])
+    && !keywordMatch(dialogText, SAVE_SUCCESS_MODAL_HINT_KEYWORDS)
+  ) {
+    return {
+      matched: false,
+      dismissed: false,
+      dialogText
+    }
+  }
+
+  const dismissalAction = await findInteractiveInRootByKeywords(dialog, [
+    "\u7ee7\u7eed\u7f16\u8f91",
+    "\u786e\u5b9a",
+    "\u786e\u8ba4",
+    "continue",
+    "ok",
+    "confirm"
+  ]) ?? await firstVisible([
+    dialog.locator("[aria-label*='close' i]"),
+    dialog.locator("[title*='close' i]"),
+    dialog.locator(".ant-modal-close, .el-dialog__headerbtn, .modal-close, [class*='close' i]")
+  ]) ?? await findLastVisibleActionInRoot(dialog)
+  if (!dismissalAction) {
+    return {
+      matched: true,
+      dismissed: false,
+      dialogText
+    }
+  }
+
+  const baselineDialogCount = Math.max(0, dialogs.length - 1)
+  await clickAfterDianxiaomiIdle(page, dismissalAction, 1)
+  return {
+    matched: true,
+    dismissed: await waitForVisibleModalCandidateCountAtMost(page, baselineDialogCount, 5_000),
+    dialogText
+  }
+}
+
+const readInstantActionFeedback = async (page: Page): Promise<SubmitFeedback> => {
+  const texts = await collectFeedbackTexts(page)
+
+  for (const item of texts) {
+    const matchedKeyword = keywordMatch(item.text, MEDIA_INSTANT_FAILURE_KEYWORDS)
+    if (matchedKeyword) {
+      return {
+        state: "failure",
+        message: focusBodyFeedbackText(item.text, matchedKeyword, item.source),
+        source: item.source
+      }
+    }
+  }
+
+  for (const item of texts) {
+    const matchedKeyword = keywordMatch(item.text, MEDIA_INSTANT_SUCCESS_KEYWORDS)
+    if (matchedKeyword) {
+      return {
+        state: "success",
+        message: focusBodyFeedbackText(item.text, matchedKeyword, item.source),
+        source: item.source
+      }
+    }
+  }
+
+  return {
+    state: "unknown",
+    message: texts[0]?.text ?? "",
+    source: texts[0]?.source ?? "none"
+  }
+}
+
+const uniqueImageCheckIssues = (issues: ImageCheckIssue[]) => {
+  const seen = new Set<string>()
+  return issues.filter((issue) => {
+    const key = `${issue.category.toLowerCase()}::${issue.issue.toLowerCase()}::${(issue.detail ?? "").toLowerCase()}`
+    if (seen.has(key)) {
+      return false
+    }
+    seen.add(key)
+    return true
+  })
+}
+
+const extractImageCheckIssues = (message: string): ImageCheckIssue[] =>
+  extractDianxiaomiImageCheckIssues(normalizeFeedbackText(message))
+
+const extractPositiveImageCheckSummaryIssues = (message: string): ImageCheckIssue[] =>
+  parseDianxiaomiImageCheckSummary(normalizeFeedbackText(message))
+
+const isSameImageCheckIssue = (left: ImageCheckIssue, right: ImageCheckIssue) =>
+  cleanVisibleText(left.category).toLowerCase() === cleanVisibleText(right.category).toLowerCase()
+  && cleanVisibleText(left.issue).toLowerCase() === cleanVisibleText(right.issue).toLowerCase()
+
+const filterRequestedImageCheckIssuesBySummary = (
+  requestedIssues: ImageCheckIssue[],
+  surfacedIssues: ImageCheckIssue[]
+) => {
+  if (requestedIssues.length === 0 || surfacedIssues.length === 0) {
+    return [] as ImageCheckIssue[]
+  }
+
+  return uniqueImageCheckIssues(
+    requestedIssues.filter((requestedIssue) =>
+      surfacedIssues.some((surfacedIssue) => isSameImageCheckIssue(requestedIssue, surfacedIssue))
+    )
+  )
+}
+
+const waitForInstantActionFeedback = async (
+  page: Page,
+  timeoutMs = 8_000
+): Promise<SubmitFeedback> => {
+  const startedAt = Date.now()
+  let latest: SubmitFeedback = {
+    state: "unknown",
+    message: "",
+    source: "none"
+  }
+
+  while (Date.now() - startedAt < timeoutMs) {
+    latest = await readInstantActionFeedback(page)
+    if (latest.state !== "unknown") {
+      return latest
+    }
+
+    await page.waitForTimeout(500)
+  }
+
+  return latest
+}
+
+// P0-F: probe the listing's visible <img> elements to produce a small
+// signature. Two probes return equal iff nothing in the listing image DOM
+// changed. Used as hard evidence for instant-action tools and as soft
+// evidence (recorded, not enforced) for dialog-based tools.
+const LISTING_IMAGE_SELECTOR = [
+  "img[class*='product' i]",
+  "img[class*='main' i]",
+  "img[class*='sku' i]",
+  "img[class*='variant' i]",
+  "img[class*='gallery' i]",
+  "img[class*='detail' i]"
+].join(", ")
+
+const collectImageSignature = async (page: Page): Promise<string> => {
+  const signature: string[] = []
+  try {
+    const images = page.locator(LISTING_IMAGE_SELECTOR)
+    const count = Math.min(await images.count().catch(() => 0), 80)
+    for (let index = 0; index < count; index += 1) {
+      const image = images.nth(index)
+      if (!await image.isVisible().catch(() => false)) {
+        continue
+      }
+      const src = await image.getAttribute("src").catch(() => "")
+      const naturalWidth = await image.evaluate((element) => (element as HTMLImageElement).naturalWidth).catch(() => 0)
+      const naturalHeight = await image.evaluate((element) => (element as HTMLImageElement).naturalHeight).catch(() => 0)
+      if (!src && naturalWidth === 0 && naturalHeight === 0) {
+        continue
+      }
+      signature.push(`${src}|${naturalWidth}x${naturalHeight}`)
+    }
+  } catch {
+    // best-effort probe; an empty signature is still usable for comparison
+  }
+  return signature.join(";")
+}
+
+const readMediaApplyFeedback = async (
+  page: Page,
+  root: Locator | null,
+  toolId?: MediaToolDefinition["id"]
+): Promise<MediaApplyFeedback> => {
   const texts = [
     ...(root
       ? [{
@@ -1288,8 +7963,29 @@ const readMediaApplyFeedback = async (page: Page, root: Locator | null): Promise
     ...await collectFeedbackTexts(page)
   ]
 
+  if (toolId === "image-translation") {
+    const overlayFeedback = await interpretImageTranslationOverlayFeedback(page)
+    if (overlayFeedback) {
+      return overlayFeedback
+    }
+
+    const translationFeedback = interpretImageTranslationFeedback(texts)
+    if (translationFeedback) {
+      return translationFeedback
+    }
+  }
+
   for (const item of texts) {
-    if (keywordMatch(item.text, MEDIA_APPLY_FAILURE_KEYWORDS)) {
+    const matchedFailureKeyword = keywordMatch(item.text, MEDIA_APPLY_FAILURE_KEYWORDS)
+    if (matchedFailureKeyword) {
+      if (
+        toolId === "image-translation"
+        && matchedFailureKeyword === "\u7ffb\u8bd1\u5931\u8d25"
+        && parseImageTranslationFeedback(item.text).failureCount === 0
+      ) {
+        continue
+      }
+
       return {
         state: "failure",
         message: item.text,
@@ -1325,6 +8021,7 @@ const waitForMediaApplyFeedback = async (
   page: Page,
   root: Locator | null,
   timeoutMs = 8_000,
+  toolId?: MediaToolDefinition["id"],
   previousFeedback?: MediaApplyFeedback | null,
   duplicateFeedbackGraceMs = 2_500
 ): Promise<MediaApplyFeedback> => {
@@ -1336,7 +8033,7 @@ const waitForMediaApplyFeedback = async (
   }
 
   while (Date.now() - startedAt < timeoutMs) {
-    latest = await readMediaApplyFeedback(page, root)
+    latest = await readMediaApplyFeedback(page, root, toolId)
     if (latest.state !== "unknown") {
       if (!sameMediaApplyFeedback(latest, previousFeedback) || Date.now() - startedAt >= duplicateFeedbackGraceMs) {
         return latest
@@ -1347,6 +8044,125 @@ const waitForMediaApplyFeedback = async (
   }
 
   return latest
+}
+
+const waitForImageTranslationSubmissionSignal = async (
+  page: Page,
+  root: Locator | null,
+  previousQuota: number | null,
+  timeoutMs = 8_000
+): Promise<MediaApplyFeedback | null> => {
+  if (!root || previousQuota === null) {
+    return null
+  }
+
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const text = normalizeFeedbackText(await root.innerText().catch(() => ""))
+    const nextQuota = extractImageTranslationQuotaCount(text)
+    if (nextQuota !== null && nextQuota < previousQuota) {
+      return {
+        state: "success",
+        message: `image translation quota decreased: ${previousQuota} -> ${nextQuota}`,
+        source: "media-quota"
+      }
+    }
+
+    await page.waitForTimeout(500)
+  }
+
+  return null
+}
+
+const shouldWaitForImageTranslationResultDialog = (feedback: MediaApplyFeedback) => {
+  if (feedback.state === "failure") {
+    return false
+  }
+
+  const message = normalizeFeedbackText(feedback.message || "")
+  const parsed = parseImageTranslationFeedback(message)
+  if (parsed.inProgress) {
+    return true
+  }
+
+  if (feedback.source === "translation-result-overlay" || feedback.source === "translation-result-dialog") {
+    return true
+  }
+
+  return Boolean(keywordMatch(message, IMAGE_TRANSLATION_RESULT_DIALOG_HINTS))
+    || Boolean(keywordMatch(message, IMAGE_TRANSLATION_RESULT_READY_KEYWORDS))
+}
+
+const waitForImageTranslationResultDialog = async (
+  page: Page,
+  timeoutMs = IMAGE_TRANSLATION_COMPLETION_TIMEOUT_MS
+): Promise<MediaApplyFeedback | null> => {
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const dialog = await getLatestImageTranslationDialog(page)
+    if (dialog) {
+      const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+      const parsed = parseImageTranslationFeedback(text)
+
+      if (
+        (parsed.successCount !== null && parsed.failureCount !== null && !parsed.inProgress)
+        || keywordMatch(text, IMAGE_TRANSLATION_RESULT_READY_KEYWORDS)
+      ) {
+        if (parsed.failureCount !== null && parsed.failureCount > 0) {
+          return {
+            state: "failure",
+            message: text,
+            source: "translation-result-dialog"
+          }
+        }
+
+        return {
+          state: "success",
+          message: text,
+          source: "translation-result-dialog"
+        }
+      }
+
+      if (
+        keywordMatch(text, IMAGE_TRANSLATION_RESULT_DIALOG_HINTS)
+        && await findImageTranslationResultAction(dialog)
+      ) {
+        return {
+          state: "success",
+          message: text,
+          source: "translation-result-dialog"
+        }
+      }
+    }
+
+    const overlay = await getTopmostOverlayAboveImageTranslation(page)
+    if (overlay) {
+      const matchedFailureKeyword = keywordMatch(overlay.text, MEDIA_APPLY_FAILURE_KEYWORDS)
+      if (matchedFailureKeyword) {
+        return {
+          state: "failure",
+          message: overlay.text,
+          source: "translation-result-overlay"
+        }
+      }
+
+      const overlayAction = await findInteractiveInRootByKeywords(overlay.dialog, IMAGE_TRANSLATION_RESULT_CONFIRM_KEYWORDS)
+        ?? await findImageTranslationResultAction(overlay.dialog)
+        ?? await findInteractiveInRootByKeywords(overlay.dialog, MEDIA_CLOSE_KEYWORDS)
+      if (overlayAction) {
+        return {
+          state: "success",
+          message: overlay.text || "image translation result confirmation is ready",
+          source: "translation-result-overlay"
+        }
+      }
+    }
+
+    await page.waitForTimeout(1000)
+  }
+
+  return null
 }
 
 const waitForSubmitFeedback = async (
@@ -1414,16 +8230,19 @@ const runSubmitAttempt = async (
   attempt: number
 ): Promise<SubmitAttemptResult> => {
   const previousFeedback = await readSubmitFeedback(page)
-  const clickedSubmit = await clickByKeywords(page, ["发布", "提交", "立即刊登", "submit", "publish"], config.buttons?.submit)
-  if (!clickedSubmit) {
+  const submitClick = await clickDianxiaomiSubmitAction(page, config)
+
+  if (!submitClick.clickedButton) {
     return {
       attempt,
       clickedSubmit: false,
+      clickedSubmitMenuAction: false,
       clickedConfirm: false,
       feedbackChanged: false,
       state: "failure",
       message: "未找到店小秘发布/提交按钮",
-      source: "submit-button"
+      source: "submit-button",
+      submitMenuActionText: null
     }
   }
 
@@ -1433,9 +8252,11 @@ const runSubmitAttempt = async (
 
   return {
     attempt,
-    clickedSubmit,
+    clickedSubmit: submitClick.clickedButton,
+    clickedSubmitMenuAction: submitClick.clickedMenuAction,
     clickedConfirm,
     feedbackChanged: feedback.state !== "unknown" && !sameSubmitFeedback(feedback, previousFeedback),
+    submitMenuActionText: submitClick.menuActionText,
     ...feedback
   }
 }
@@ -1454,6 +8275,7 @@ const submitListingWithVerification = async (
     console.log(`submit-listing attempt ${attempt}/${maxAttempts}: ${result.state} ${result.message}`)
 
     if (result.state === "success" && result.feedbackChanged) {
+      const dismissal = await dismissSaveSuccessModalIfPresent(page)
       return stepResult(
         "submit-listing",
         "Submit listing",
@@ -1463,7 +8285,10 @@ const submitListingWithVerification = async (
           attempts,
           maxAttempts,
           success: true,
-          verified: true
+          verified: true,
+          dismissedSuccessModal: dismissal.dismissed,
+          matchedSuccessModal: dismissal.matched,
+          successModalText: dismissal.dialogText || null
         }
       )
     }
@@ -1486,6 +8311,217 @@ const submitListingWithVerification = async (
       success: false,
       verified: false,
       failureReason: lastFailureReason
+    }
+  )
+}
+
+// P0-C: save-draft verification. Mirrors `submitListingWithVerification` but
+// is tuned for the save-draft feedback surface (no confirm dialog, no multi-
+// second review queue, single click target). maxAttempts defaults lower (2)
+// because the save action is idempotent and a single retry is usually enough.
+type SaveDraftAttemptResult = {
+  attempt: number
+  clickedSave: boolean
+  feedbackChanged: boolean
+} & SubmitFeedback
+
+const runSaveDraftAttempt = async (
+  page: Page,
+  config: DianxiaomiSelectorConfig,
+  attempt: number
+): Promise<SaveDraftAttemptResult> => {
+  const previousFeedback = await readSaveDraftFeedback(page)
+  await dismissSaveSuccessModalIfPresent(page)
+  const dialogsBeforeClick = await getPageSafetyState(page)
+  if (dialogsBeforeClick.visibleDialogCount > 0) {
+    await closeMediaSurfaceStackToBaseline(page, 0, config)
+    await dismissSaveSuccessModalIfPresent(page)
+  }
+
+  let saveButton = await findSaveDraftButton(page, config.buttons?.save)
+  if (!saveButton) {
+    return {
+      attempt,
+      clickedSave: false,
+      feedbackChanged: false,
+      state: "failure",
+      message: "未找到店小秘保存草稿按钮",
+      source: "save-button"
+    }
+  }
+
+  const clickSaveButtonStable = async (button: Locator, retries: number) => {
+    await button.scrollIntoViewIfNeeded().catch(() => undefined)
+    await page.evaluate(() => {
+      window.scrollBy(0, -240)
+    }).catch(() => undefined)
+    try {
+      await clickAfterDianxiaomiIdle(page, button, retries)
+      return true
+    } catch {
+      return forceDomClick(button)
+    }
+  }
+
+  try {
+    const clicked = await clickSaveButtonStable(saveButton, 2)
+    if (!clicked) {
+      throw new Error("save button click failed")
+    }
+  } catch {
+    await dismissSaveSuccessModalIfPresent(page)
+    await closeMediaSurfaceStackToBaseline(page, 0, config)
+    saveButton = await findSaveDraftButton(page, config.buttons?.save)
+    if (!saveButton) {
+      return {
+        attempt,
+        clickedSave: false,
+        feedbackChanged: false,
+        state: "failure",
+        message: "save draft stayed blocked by a Dianxiaomi dialog",
+        source: "save-button"
+      }
+    }
+
+    const clicked = await clickSaveButtonStable(saveButton, 1)
+    if (!clicked) {
+      return {
+        attempt,
+        clickedSave: false,
+        feedbackChanged: false,
+        state: "failure",
+        message: "save draft click failed after retry",
+        source: "save-button"
+      }
+    }
+  }
+
+  await page.waitForTimeout(600)
+  const feedback = await waitForSaveDraftFeedback(page, 6_000, previousFeedback)
+
+  return {
+    attempt,
+    clickedSave: true,
+    feedbackChanged: feedback.state !== "unknown" && !sameSaveDraftFeedback(feedback, previousFeedback),
+    ...feedback
+  }
+}
+
+const saveDraftWithVerification = async (
+  page: Page,
+  config: DianxiaomiSelectorConfig,
+  maxAttempts = 2
+) => {
+  const attempts: SaveDraftAttemptResult[] = []
+  const recoverySteps: Array<{
+    attempt: number
+    trigger: string
+    result: AutomationStepResult
+  }> = []
+  const boundedMax = Math.max(1, Math.min(5, maxAttempts))
+
+  for (let attempt = 1; attempt <= boundedMax; attempt += 1) {
+    const result = await runSaveDraftAttempt(page, config, attempt)
+    attempts.push(result)
+    console.log(`save-draft attempt ${attempt}/${boundedMax}: ${result.state} ${result.message}`)
+
+    if (result.state === "success" && result.feedbackChanged) {
+      const dismissal = await dismissSaveSuccessModalIfPresent(page)
+      return stepResult(
+        "save-draft",
+        "保存草稿",
+        "done",
+        `Dianxiaomi save-draft succeeded: ${result.message || "success"}`,
+        {
+          attempts,
+          maxAttempts: boundedMax,
+          success: true,
+          verified: true,
+          dismissedSuccessModal: dismissal.dismissed,
+          matchedSuccessModal: dismissal.matched,
+          successModalText: dismissal.dialogText || null
+        }
+      )
+    }
+
+    if (attempt < boundedMax && result.state === "failure" && isColorSkcLimitSaveFailure(result.message)) {
+      const trimResult = await trimColorSkcGroupsToLimit(page, COLOR_SKC_MAX_GROUPS, 0)
+      recoverySteps.push({
+        attempt,
+        trigger: "color-skc-limit",
+        result: trimResult
+      })
+      console.log(`save-draft recovery after attempt ${attempt}: ${trimResult.status} ${trimResult.detail}`)
+      await page.waitForTimeout(1_200)
+      continue
+    }
+
+    if (attempt < boundedMax && result.state === "failure" && isSiteWarehouseSaveFailure(result.message)) {
+      const warehouseResult = await normalizeSiteWarehouse(page)
+      recoverySteps.push({
+        attempt,
+        trigger: "site-warehouse",
+        result: warehouseResult
+      })
+      console.log(`save-draft recovery after attempt ${attempt}: ${warehouseResult.status} ${warehouseResult.detail}`)
+      await page.waitForTimeout(1_200)
+      continue
+    }
+
+    if (attempt < boundedMax && result.state === "failure" && isShipmentPromiseSaveFailure(result.message)) {
+      const shipmentPromiseResult = await normalizeShipmentPromise(page)
+      recoverySteps.push({
+        attempt,
+        trigger: "shipment-promise",
+        result: shipmentPromiseResult
+      })
+      console.log(`save-draft recovery after attempt ${attempt}: ${shipmentPromiseResult.status} ${shipmentPromiseResult.detail}`)
+      await page.waitForTimeout(1_200)
+      continue
+    }
+
+    if (attempt < boundedMax && result.state === "failure" && isFreightTemplateSaveFailure(result.message)) {
+      const freightTemplateResult = await normalizeFreightTemplate(page)
+      recoverySteps.push({
+        attempt,
+        trigger: "freight-template",
+        result: freightTemplateResult
+      })
+      console.log(`save-draft recovery after attempt ${attempt}: ${freightTemplateResult.status} ${freightTemplateResult.detail}`)
+      await page.waitForTimeout(1_200)
+      continue
+    }
+
+    await page.waitForTimeout(800)
+  }
+
+  const lastAttempt = attempts[attempts.length - 1]
+  const lastFailureReason = lastAttempt?.state === "failure"
+    ? lastAttempt.message
+    : lastAttempt?.state === "unknown"
+      ? "no save-draft success feedback detected (button click landed but Dianxiaomi did not confirm)"
+      : "no verified success message detected"
+  const validationSummary = await collectPageValidationSummary(page)
+  const validationIssuePreview = validationSummary.issues
+    .slice(0, 3)
+    .map((issue) => issue.explain.find(Boolean) || issue.label || issue.text)
+    .filter(Boolean)
+  const validationSuffix = validationIssuePreview.length > 0
+    ? ` Remaining page issues: ${validationIssuePreview.join("; ")}`
+    : ""
+  return stepResult(
+    "save-draft",
+    "保存草稿",
+    "failed",
+    `Dianxiaomi save-draft did not succeed: ${lastFailureReason}${validationSuffix}`,
+    {
+      attempts,
+      maxAttempts: boundedMax,
+      recoverySteps,
+      success: false,
+      verified: false,
+      failureReason: lastFailureReason,
+      validationSummary
     }
   )
 }
@@ -1518,6 +8554,1143 @@ const findMediaApplyButtonForTool = async (
     ?? await findInteractiveInRootByKeywords(dialog, MEDIA_APPLY_KEYWORDS[tool.id])
 }
 
+const ensureCheckboxNearText = async (
+  root: Locator,
+  labelText: string,
+  checked: boolean
+) => {
+  const labelPattern = new RegExp(escapeRegExp(labelText), "i")
+  const label = root.locator("label, .ant-checkbox-wrapper").filter({ hasText: labelPattern }).first()
+  const checkbox = label.locator("input[type='checkbox']").first()
+  const hasCheckbox = await checkbox.count().catch(() => 0) > 0
+  if (!hasCheckbox) {
+    return null
+  }
+
+  const current = await checkbox.isChecked().catch(() => false)
+  if (current !== checked) {
+    await label.click()
+    await root.page().waitForTimeout(200)
+  }
+
+  return await checkbox.isChecked().catch(() => current)
+}
+
+const prepareBatchResizeDialog = async (
+  page: Page,
+  tool: MediaToolSafetyItem,
+  targetSidePx = BATCH_RESIZE_TARGET_SIDE_PX
+) => {
+  const dialog = await getLatestMediaDialog(page)
+  if (!dialog) {
+    tool.preparation = {
+      prepared: false,
+      reason: "batch resize dialog missing"
+    }
+    return false
+  }
+
+  const dialogText = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+  /*
+  const isBatchResizeDialog = keywordMatch(dialogText, [
+    "批量改图片尺寸",
+    "改图片尺寸",
+    "批量改大小",
+    "生成JPG图片",
+    "生成PNG图片",
+    "图片小边",
+    "变化至"
+    "batch resize",
+    "apply resize",
+    "normalize image dimensions",
+    "file sizes"
+  ])
+  */
+  const isBatchResizeDialog = keywordMatch(dialogText, [
+    "\u6279\u91cf\u6539\u56fe\u7247\u5c3a\u5bf8",
+    "\u6539\u56fe\u7247\u5c3a\u5bf8",
+    "\u6279\u91cf\u6539\u5927\u5c0f",
+    "\u751f\u6210JPG\u56fe\u7247",
+    "\u751f\u6210PNG\u56fe\u7247",
+    "\u56fe\u7247\u5c0f\u8fb9",
+    "\u7b49\u6bd4\u4f8b",
+    "\u7b49\u6bd4\u4f8b\u8c03\u6574",
+    "batch resize",
+    "apply resize",
+    "normalize image dimensions",
+    "file sizes"
+  ])
+  if (!isBatchResizeDialog) {
+    tool.preparation = {
+      prepared: false,
+      reason: "latest media dialog is not batch resize",
+      dialogText
+    }
+    return false
+  }
+
+  const selects = dialog.locator(".ant-select:visible")
+  const selectCount = await selects.count().catch(() => 0)
+  const firstSelect = selectCount > 0 ? selects.nth(0) : null
+  const secondSelect = selectCount > 1 ? selects.nth(1) : null
+  const firstSelectText = await readVisibleText(firstSelect)
+  const secondSelectText = await readVisibleText(secondSelect)
+  const selectedResizeMode = !firstSelect
+    ? null
+    : firstSelectText.includes("等比例")
+      ? firstSelectText
+      : await selectAntOption(page, firstSelect, ["等比例调整", "等比例"], "等比例")
+  const selectedResizeSide = !secondSelect
+    ? null
+    : secondSelectText.includes("图片小边") || secondSelectText.includes("小边")
+      ? secondSelectText
+      : await selectAntOption(page, secondSelect, ["图片小边", "小边"], "图片小边")
+
+  const valueInput = await firstVisible([
+    dialog.locator("input[name='valueW']"),
+    dialog.locator("input[type='text']").filter({ hasText: /\S/ }),
+    dialog.locator("input.ant-input")
+  ])
+
+  if (!valueInput) {
+    tool.preparation = {
+      prepared: false,
+      reason: "batch resize value input missing",
+      selectedResizeMode,
+      selectedResizeSide
+    }
+    return false
+  }
+
+  await fillTextField(valueInput, String(targetSidePx))
+  const selectAllChecked = await ensureCheckboxNearText(dialog, "选择全部", true)
+  const actualValue = await valueInput.inputValue().catch(() => "")
+  tool.preparation = {
+    prepared: actualValue === String(targetSidePx),
+    targetSidePx,
+    selectedResizeMode,
+    selectedResizeSide,
+    selectAllChecked,
+    actualValue
+  }
+
+  return actualValue === String(targetSidePx)
+}
+
+const getImageCheckDialog = async (page: Page) => {
+  const imageCheckSignals = ".img-test, .img-test-items, .img-test-details-list, label.image-checkbox, .single-image"
+  const directRoots = [
+    page.locator(".img-test:visible"),
+    page.locator(".ant-modal:visible").filter({ has: page.locator(imageCheckSignals) }),
+    page.locator(".ant-modal-wrap:visible").filter({ has: page.locator(imageCheckSignals) })
+  ]
+
+  for (const root of directRoots) {
+    const count = await root.count().catch(() => 0)
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const locator = root.nth(index)
+      if (await locator.isVisible().catch(() => false)) {
+        return locator
+      }
+    }
+  }
+
+  const dialogs = await visibleDialogLocators(page)
+
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    const dialog = dialogs[index]
+    const signalCount = await dialog.locator(imageCheckSignals).count().catch(() => 0)
+    if (signalCount > 0) {
+      return dialog
+    }
+    const text = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+    if (text.includes("图片检测") || text.includes("图片包含文字") || text.includes("尺寸不合规")) {
+      return dialog
+    }
+  }
+
+  return null
+}
+
+const waitForImageCheckDialog = async (page: Page, timeoutMs = 8_000) => {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const dialog = await getImageCheckDialog(page)
+    if (dialog) {
+      return dialog
+    }
+    await page.waitForTimeout(300)
+  }
+
+  return getImageCheckDialog(page)
+}
+
+const requireFreshImageCheckDialog = async (page: Page, fallback: Locator | null) => {
+  const fresh = await getImageCheckDialog(page)
+  return fresh ?? fallback
+}
+
+const parseImageCheckCategorySummary = (label: string): ImageCheckCategorySummary => {
+  const normalized = cleanVisibleText(label)
+  const countMatch = normalized.match(/(\d+)\s*$/)
+  return {
+    label: countMatch ? normalized.slice(0, countMatch.index).trim() : normalized,
+    count: countMatch ? Number.parseInt(countMatch[1] ?? "0", 10) : 0
+  }
+}
+
+const collectImageCheckCategoryItems = async (dialog: Locator) => {
+  const items = dialog.locator(".img-test-items li")
+  const count = Math.min(await items.count().catch(() => 0), 12)
+  const categories: Array<{ locator: Locator; label: string; count: number }> = []
+
+  for (let index = 0; index < count; index += 1) {
+    const locator = items.nth(index)
+    if (!await locator.isVisible().catch(() => false)) {
+      continue
+    }
+    const text = cleanVisibleText(await locator.innerText().catch(() => ""))
+    if (!text) {
+      continue
+    }
+    const parsed = parseImageCheckCategorySummary(text)
+    categories.push({
+      locator,
+      label: parsed.label,
+      count: parsed.count
+    })
+  }
+
+  return categories
+}
+
+const classifyIssueToImageCheckCategory = (
+  issue: ImageCheckIssue,
+  categories: Array<{ label: string; count: number }>
+) => {
+  const issueText = `${issue.category} ${issue.issue} ${issue.detail ?? ""}`
+  const matchedRule = IMAGE_CHECK_CATEGORY_RULES.find((rule) => rule.issuePattern.test(issueText))
+  if (matchedRule) {
+    const matchedCategory = categories.find((category) => matchedRule.categoryPattern.test(category.label))
+    if (matchedCategory) {
+      return matchedCategory.label
+    }
+  }
+
+  return categories
+    .sort((left, right) => {
+      const leftPriority = IMAGE_CHECK_CATEGORY_PRIORITY.indexOf(left.label as typeof IMAGE_CHECK_CATEGORY_PRIORITY[number])
+      const rightPriority = IMAGE_CHECK_CATEGORY_PRIORITY.indexOf(right.label as typeof IMAGE_CHECK_CATEGORY_PRIORITY[number])
+      const leftOrder = leftPriority >= 0 ? leftPriority : Number.MAX_SAFE_INTEGER
+      const rightOrder = rightPriority >= 0 ? rightPriority : Number.MAX_SAFE_INTEGER
+      return leftOrder - rightOrder
+    })[0]?.label ?? null
+}
+
+const clickImageCheckCategory = async (
+  page: Page,
+  dialog: Locator,
+  categoryLabel: string
+) => {
+  const categories = await collectImageCheckCategoryItems(dialog)
+  const target = categories.find((item) => item.label === categoryLabel)
+  if (!target) {
+    return false
+  }
+
+  await clickAfterDianxiaomiIdle(page, target.locator, 1)
+  await page.waitForTimeout(500)
+  return true
+}
+
+const collectImageCheckSelectionCandidates = async (dialog: Locator): Promise<ImageCheckSelectionCandidate[]> => {
+  const cards = dialog.locator(".img-test-details-list .single-image, .img-test-details-list label.image-checkbox")
+  const count = Math.min(await cards.count().catch(() => 0), IMAGE_CHECK_MAX_VISIBLE_CANDIDATES)
+  const candidates: ImageCheckSelectionCandidate[] = []
+  const seen = new Set<string>()
+
+  for (let index = 0; index < count; index += 1) {
+    const card = cards.nth(index)
+    if (!await card.isVisible().catch(() => false)) {
+      continue
+    }
+    const text = cleanVisibleText(await card.innerText().catch(() => ""))
+    if (!text) {
+      continue
+    }
+    const dimensionMatch = text.match(/(\d+\s*[xX]\s*\d+)/)
+    const imageType = cleanVisibleText(await card.locator(".img-tag").first().innerText().catch(() => ""))
+    const src = await card.locator("img").first().getAttribute("src").catch(() => null)
+    const candidate = {
+      label: text.slice(0, 120),
+      dimensions: dimensionMatch?.[1] ?? null,
+      imageType: imageType || null,
+      src: src?.trim() || null
+    }
+    const key = [
+      candidate.label.toLowerCase(),
+      (candidate.dimensions ?? "").toLowerCase(),
+      (candidate.imageType ?? "").toLowerCase(),
+      (candidate.src ?? "").toLowerCase()
+    ].join("::")
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    candidates.push(candidate)
+  }
+
+  return candidates
+}
+
+const selectImageCheckCandidates = async (page: Page, dialog: Locator) => {
+  const candidateLabels = dialog.locator(".img-test-details-list label.image-checkbox")
+  const count = Math.min(await candidateLabels.count().catch(() => 0), IMAGE_CHECK_MAX_VISIBLE_CANDIDATES)
+  let selectedCount = 0
+
+  // Real Dianxiaomi size-check categories can expose 25+ replacement cards.
+  // Prefer the dialog's built-in select-all control so we do not silently miss
+  // the last card when the list grows beyond the historical 24-item sample.
+  await ensureCheckboxNearText(dialog, "选择全部", true)
+
+  for (let index = 0; index < count; index += 1) {
+    const label = candidateLabels.nth(index)
+    if (!await label.isVisible().catch(() => false)) {
+      continue
+    }
+    const checkbox = label.locator("input[type='checkbox']").first()
+    const current = await checkbox.isChecked().catch(() => false)
+    if (current) {
+      selectedCount += 1
+      continue
+    }
+    await checkbox.check({ force: true }).catch(async () => {
+      await label.click({ force: true }).catch(() => undefined)
+    })
+    await page.waitForTimeout(120)
+    if (await checkbox.isChecked().catch(() => false)) {
+      selectedCount += 1
+    }
+  }
+
+  return selectedCount
+}
+
+const inferImageCheckBatchTool = (issues: ImageCheckIssue[]) => {
+  const combined = issues
+    .map((issue) => `${issue.category} ${issue.issue} ${issue.detail ?? ""}`)
+    .join(" ")
+    .toLowerCase()
+  const normalizedIssues = new Set(
+    issues
+      .map((issue) => cleanVisibleText(issue.issue).toLowerCase())
+      .filter(Boolean)
+  )
+
+  if (
+    normalizedIssues.has("\u975e\u82f1\u6587")
+    || normalizedIssues.has("\u6c34\u5370")
+    || /(?:\u975e\u82f1\u6587|\u975e\u82f1\u8bed|\u4e2d\u6587|\u6587\u5b57|\u6c34\u5370|language|english|translate|translation|watermark)/i.test(combined)
+  ) {
+    return "image-translation" as const
+  }
+  if (
+    normalizedIssues.has("\u5c3a\u5bf8")
+    || normalizedIssues.has("\u6bd4\u4f8b")
+    || normalizedIssues.has("\u5bbd\u9ad8")
+    || normalizedIssues.has("\u50cf\u7d20")
+    || normalizedIssues.has("\u5927\u5c0f")
+    || normalizedIssues.has("\u683c\u5f0f")
+    || /(?:\u5c3a\u5bf8|\u6bd4\u4f8b|\u5bbd\u9ad8|\u50cf\u7d20|\u5927\u5c0f|\u8fc7\u5927|\u683c\u5f0f|size|ratio|aspect|resolution|format|oversize|too large)/i.test(combined)
+  ) {
+    return "batch-resize" as const
+  }
+
+  return null
+}
+
+const saveImageCheckDialog = async (
+  page: Page,
+  dialog: Locator
+) => {
+  const liveDialog = await requireFreshImageCheckDialog(page, dialog)
+  if (!liveDialog) {
+    return {
+      saved: false,
+      feedback: null as MediaApplyFeedback | null
+    }
+  }
+  const saveButton = await findInteractiveInRootByKeywords(liveDialog, IMAGE_CHECK_SAVE_KEYWORDS)
+  if (!saveButton) {
+    return {
+      saved: false,
+      feedback: null as MediaApplyFeedback | null
+    }
+  }
+
+  const beforeDialogCount = (await visibleDialogLocators(page)).length
+  await clickAfterDianxiaomiIdle(page, saveButton, 1)
+
+  const startedAt = Date.now()
+  let latestFeedback: MediaApplyFeedback | null = null
+  while (Date.now() - startedAt < 12_000) {
+    const currentDialog = await getImageCheckDialog(page)
+    if (!currentDialog) {
+      return {
+        saved: true,
+        feedback: latestFeedback ?? {
+          state: "success",
+          message: "image check dialog closed after save",
+          source: "dialog-close"
+        }
+      }
+    }
+
+    const feedbackTexts = (await collectFeedbackTexts(page)).filter((item) =>
+      item.source !== "body"
+      && item.source !== "media-surface"
+    )
+
+    for (const item of feedbackTexts) {
+      const matchedFailureKeyword = keywordMatch(item.text, MEDIA_APPLY_FAILURE_KEYWORDS)
+      if (matchedFailureKeyword) {
+        return {
+          saved: false,
+          feedback: {
+            state: "failure",
+            message: item.text,
+            source: item.source
+          }
+        }
+      }
+    }
+
+    for (const item of feedbackTexts) {
+      if (keywordMatch(item.text, MEDIA_APPLY_SUCCESS_KEYWORDS)) {
+        latestFeedback = {
+          state: "success",
+          message: item.text,
+          source: item.source
+        }
+        break
+      }
+    }
+
+    if (
+      latestFeedback?.state === "success"
+      && await waitForVisibleDialogCountAtMost(page, Math.max(0, beforeDialogCount - 1), 2_000)
+    ) {
+      return {
+        saved: true,
+        feedback: latestFeedback
+      }
+    }
+
+    await page.waitForTimeout(400)
+  }
+
+  if (!await getImageCheckDialog(page)) {
+    return {
+      saved: true,
+      feedback: latestFeedback ?? {
+        state: "success",
+        message: "image check dialog closed after save",
+        source: "dialog-close"
+      }
+    }
+  }
+
+  await closeImageCheckDialogIfPresent(page)
+  return {
+    saved: false,
+    feedback: latestFeedback
+  }
+}
+
+const closeImageCheckDialogIfPresent = async (page: Page) => {
+  const closeTopmostBlockingOverlayIfPresent = async (targetDialog: Locator) => {
+    const candidates = await visibleModalCandidates(page)
+    if (candidates.length < 2) {
+      return false
+    }
+
+    const targetKey = await locatorIdentityKey(targetDialog)
+    const topmost = candidates[candidates.length - 1] ?? null
+    if (!topmost) {
+      return false
+    }
+
+    const topmostKey = await locatorIdentityKey(topmost)
+    if (!targetKey || !topmostKey || topmostKey === targetKey) {
+      return false
+    }
+
+    const overlayAction = await findInteractiveInRootByKeywords(topmost, [
+      ...IMAGE_CHECK_CLOSE_KEYWORDS,
+      "\u6211\u77e5\u9053\u4e86",
+      "\u77e5\u9053\u4e86",
+      "\u786e\u5b9a",
+      "\u786e\u8ba4",
+      "ok",
+      "confirm"
+    ]) ?? await findLastVisibleActionInRoot(topmost)
+    if (!overlayAction) {
+      return false
+    }
+
+    const beforeCount = candidates.length
+    await clickAfterDianxiaomiIdle(page, overlayAction, 1)
+    await waitForVisibleModalCandidateCountAtMost(page, Math.max(0, beforeCount - 1), 5_000)
+    return true
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const dialog = await getImageCheckDialog(page)
+    if (!dialog) {
+      return true
+    }
+
+    if (await closeTopmostBlockingOverlayIfPresent(dialog)) {
+      await page.waitForTimeout(250)
+      continue
+    }
+
+    const closeButton = await findInteractiveInRootByKeywords(dialog, IMAGE_CHECK_CLOSE_KEYWORDS)
+      ?? await findLastVisibleActionInRoot(dialog)
+    if (!closeButton) {
+      return false
+    }
+
+    const beforeDialogCount = (await visibleDialogLocators(page)).length
+    await clickAfterDianxiaomiIdle(page, closeButton, 1)
+    const closed = await waitForVisibleDialogCountAtMost(page, Math.max(0, beforeDialogCount - 1), 5_000)
+    if (closed) {
+      return true
+    }
+  }
+
+  return !(await getImageCheckDialog(page))
+}
+
+const runImageCheckBatchTool = async (
+  page: Page,
+  dialog: Locator,
+  toolId: "image-translation" | "batch-resize"
+): Promise<{
+  applied: boolean
+  reason: string
+}> => {
+  const baselineVisibleDialogs = (await visibleDialogLocators(page)).length
+  const batchTrigger = await findInteractiveInRootByKeywords(dialog, ["\u6279\u91cf\u64cd\u4f5c", "batch"])
+  if (!batchTrigger) {
+    return {
+      applied: false,
+      reason: "image check batch action trigger missing"
+    }
+  }
+
+  await clickAfterDianxiaomiIdle(page, batchTrigger, 1)
+  await page.waitForTimeout(400)
+
+  const menuClicked = await clickVisibleMenuItemByKeywords(
+    page,
+    toolId === "image-translation"
+      ? ["\u56fe\u7247\u7ffb\u8bd1", "\u7ffb\u8bd1\u56fe\u7247", "image translation", "translate image"]
+      : ["\u6279\u91cf\u6539\u56fe\u7247\u5c3a\u5bf8", "\u6279\u91cf\u6539\u5927\u5c0f", "\u6539\u56fe\u7247\u5c3a\u5bf8", "batch resize", "resize"]
+  )
+  if (!menuClicked) {
+    return {
+      applied: false,
+      reason: `image check batch action menu item missing for ${toolId}`
+    }
+  }
+
+  await page.waitForTimeout(1_000)
+  const mediaSurface = await getLatestMediaDialog(page)
+  if (!mediaSurface) {
+    return {
+      applied: false,
+      reason: `${toolId} dialog did not open from image check batch action`
+    }
+  }
+
+  if (toolId === "batch-resize") {
+    const probeTool: MediaToolSafetyItem = {
+      id: "batch-resize",
+      configKey: "batchResize",
+      label: "Batch resize",
+      available: true,
+      selectorConfigured: false,
+      status: "ready-for-unattended-apply",
+      reason: "",
+      requiresManualConfirmation: false,
+      wouldClick: true,
+      wouldApply: true,
+      clicked: true,
+      applied: false,
+      locator: null
+    }
+    const prepared = await prepareBatchResizeDialog(page, probeTool)
+    if (!prepared) {
+      return {
+        applied: false,
+        reason: "batch resize preparation failed inside image check"
+      }
+    }
+    const applyButton = await findInteractiveInRootByKeywords(mediaSurface, [
+      "\u751f\u6210JPG\u56fe\u7247",
+      "\u751f\u6210PNG\u56fe\u7247",
+      "\u751f\u6210\u56fe\u7247",
+      "\u786e\u8ba4",
+      "\u786e\u5b9a",
+      "confirm",
+      "apply"
+    ])
+    if (!applyButton) {
+      return {
+        applied: false,
+        reason: "batch resize apply button missing inside image check"
+      }
+    }
+    const beforeUrl = page.url()
+    await clickAfterDianxiaomiIdle(page, applyButton, 1)
+    let feedback = await waitForBatchResizeCompletion(
+      page,
+      mediaSurface,
+      BATCH_RESIZE_TARGET_SIDE_PX,
+      BATCH_RESIZE_COMPLETION_TIMEOUT_MS,
+      null
+    )
+    if (feedback.state === "unknown") {
+      const returnToEditorFeedback = await waitForBatchResizeReturnToEditor(
+        page,
+        baselineVisibleDialogs,
+        beforeUrl
+      )
+      if (returnToEditorFeedback) {
+        feedback = returnToEditorFeedback
+      }
+    }
+    if (feedback.state !== "success") {
+      return {
+        applied: false,
+        reason: feedback.message || "batch resize did not report success inside image check"
+      }
+    }
+    await closeMediaSurfaceStackToBaseline(page, baselineVisibleDialogs, {})
+    return {
+      applied: true,
+      reason: feedback.message || "batch resize completed inside image check"
+    }
+  }
+
+  await ensureCheckboxNearText(mediaSurface, "\u9009\u62e9\u5168\u90e8", true)
+  await ensureCheckboxNearText(mediaSurface, "\u5feb\u901f\u7ffb\u8bd1", false)
+  const applyButton = await findInteractiveInRootByKeywords(mediaSurface, [
+    "\u4e00\u952e\u7ffb\u8bd1",
+    "\u5feb\u901f\u7ffb\u8bd1",
+    "translate",
+    "start translation",
+    "confirm"
+  ])
+  if (!applyButton) {
+    return {
+      applied: false,
+      reason: "image translation apply button missing inside image check"
+    }
+  }
+  const quotaBefore = extractImageTranslationQuotaCount(await mediaSurface.innerText().catch(() => ""))
+  await clickAfterDianxiaomiIdle(page, applyButton, 1)
+  await completeImageTranslationFinalActionIfPresent(page, applyButton)
+  let feedback = await waitForMediaApplyFeedback(page, mediaSurface, 90_000, "image-translation", null)
+  if (feedback.state === "unknown") {
+    const quotaFeedback = await waitForImageTranslationSubmissionSignal(page, mediaSurface, quotaBefore, 8_000)
+    if (quotaFeedback) {
+      feedback = quotaFeedback
+    }
+  }
+  if (shouldWaitForImageTranslationResultDialog(feedback)) {
+    const resultDialogFeedback = await waitForImageTranslationResultDialog(page, 180_000)
+    if (resultDialogFeedback) {
+      feedback = resultDialogFeedback
+    }
+  }
+  if (feedback.state !== "success") {
+    return {
+      applied: false,
+      reason: feedback.message || "image translation did not report success inside image check"
+    }
+  }
+
+  await finalizeImageTranslationResultIfPresent(page)
+  await closeMediaSurfaceStackToBaseline(page, baselineVisibleDialogs, {})
+  await page.waitForTimeout(500)
+  return {
+    applied: true,
+    reason: feedback.message || "image translation completed inside image check"
+  }
+}
+
+const reopenImageCheckDialog = async (
+  page: Page,
+  config: DianxiaomiSelectorConfig,
+  targetUrl?: string
+) => {
+  if (await getImageCheckDialog(page)) {
+    return true
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await dismissSaveSuccessModalIfPresent(page)
+    if (targetUrl) {
+      await waitForPublishPage(page, config, {
+        waitForManualNavigation: false,
+        targetUrl
+      })
+    } else {
+      await waitForImageCheckPageToSettle(page, 5_000)
+    }
+    const candidates = await collectMediaToolCandidates(page, config)
+    const imageManagement = candidates.find((item) => item.id === "image-management")
+    if (!imageManagement?.locator) {
+      await page.waitForTimeout(500)
+      continue
+    }
+
+    try {
+      await clickAfterDianxiaomiIdle(page, imageManagement.locator, 1)
+    } catch {
+      await page.waitForTimeout(500)
+      continue
+    }
+
+    if (await waitForImageCheckDialog(page, 5_000)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+const waitForImageCheckDialogRecovery = async (page: Page, timeoutMs = 10_000) => {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const dialog = await getImageCheckDialog(page)
+    if (dialog) {
+      return dialog
+    }
+    await page.waitForTimeout(500)
+  }
+
+  return getImageCheckDialog(page)
+}
+
+const waitForImageCheckDialogStableRecovery = async (
+  page: Page,
+  priorDialog: Locator | null,
+  timeoutMs = 15_000
+) => {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const latestDialog = await getImageCheckDialog(page)
+    if (latestDialog) {
+      return latestDialog
+    }
+
+    if (priorDialog) {
+      const priorStillVisible = await priorDialog.isVisible().catch(() => false)
+      if (priorStillVisible) {
+        return priorDialog
+      }
+    }
+
+    await page.waitForTimeout(300)
+  }
+
+  return getImageCheckDialog(page) ?? priorDialog
+}
+
+const waitForImageCheckPageToSettle = async (page: Page, timeoutMs = 10_000) => {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    const overlayVisible = await page.locator([
+      ".ant-spin-spinning:visible",
+      ".ant-spin-container-loading:visible",
+      ".loading:visible",
+      ".spinner:visible",
+      "[class*='loading' i]:visible",
+      "[class*='spinner' i]:visible"
+    ].join(", ")).count().catch(() => 0)
+
+    if (overlayVisible === 0) {
+      return true
+    }
+
+    await page.waitForTimeout(500)
+  }
+
+  return true
+}
+
+const verifyImageCheckCategoriesResolvedAfterSave = async (
+  page: Page,
+  config: DianxiaomiSelectorConfig,
+  categoryLabels: string[],
+  options: {
+    targetUrl?: string
+  } = {}
+) => {
+  const requested = Array.from(new Set(categoryLabels.map((label) => cleanVisibleText(label)).filter(Boolean)))
+  if (requested.length === 0) {
+    return {
+      verified: true,
+      remainingCategories: [] as Array<{ label: string; count: number }>,
+      surfacedIssues: [] as ImageCheckIssue[]
+    }
+  }
+
+  await dismissSaveSuccessModalIfPresent(page)
+  const targetUrl = options.targetUrl?.trim() || page.url()
+  await waitForPublishPage(page, config, {
+    waitForManualNavigation: false,
+    targetUrl
+  })
+  await waitForImageCheckPageToSettle(page, 8_000)
+  const reopened = await reopenImageCheckDialog(page, config, targetUrl)
+  if (!reopened) {
+    return {
+      verified: false,
+      remainingCategories: requested.map((label) => ({ label, count: -1 })),
+      surfacedIssues: [] as ImageCheckIssue[]
+    }
+  }
+
+  const dialog = await waitForImageCheckDialog(page, 8_000)
+  if (!dialog) {
+    return {
+      verified: false,
+      remainingCategories: requested.map((label) => ({ label, count: -1 })),
+      surfacedIssues: [] as ImageCheckIssue[]
+    }
+  }
+
+  const categories = await collectImageCheckCategoryItems(dialog)
+  const remainingCategories = requested
+    .map((label) => ({
+      label,
+      count: categories.find((item) => item.label === label)?.count ?? 0
+    }))
+    .filter((item) => item.count > 0)
+  const surfaceText = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+  const surfacedIssues = uniqueImageCheckIssues(extractImageCheckIssues(surfaceText))
+
+  await closeImageCheckDialogIfPresent(page)
+  return {
+    verified: remainingCategories.length === 0,
+    remainingCategories,
+    surfacedIssues
+  }
+}
+
+const applyImageCheckSelections = async (
+  page: Page,
+  config: DianxiaomiSelectorConfig,
+  issues: ImageCheckIssue[]
+): Promise<ImageCheckApplySummary> => {
+  const dialog = await getImageCheckDialog(page)
+  if (!dialog) {
+    return {
+      applied: false,
+      changed: false,
+      status: "failed",
+      reason: "image check dialog missing",
+      categories: [],
+      issues,
+      deferredVerification: null
+    }
+  }
+
+  const categories = await collectImageCheckCategoryItems(dialog)
+  const targetLabels = uniqueImageCheckIssues(issues)
+    .map((issue) => classifyIssueToImageCheckCategory(issue, categories))
+    .filter((label): label is string => Boolean(label))
+  const dedupedTargetLabels = Array.from(new Set(targetLabels))
+  const results: ImageCheckCategoryApplyResult[] = []
+  let changed = false
+  const deferredVerificationCategories: string[] = []
+
+  for (const categoryLabel of dedupedTargetLabels) {
+    const liveDialog = await requireFreshImageCheckDialog(page, dialog)
+    if (!liveDialog) {
+      return {
+        applied: false,
+        changed,
+        status: "failed",
+        reason: "image check dialog disappeared before category selection",
+        categories: results,
+        issues,
+        deferredVerification: null
+      }
+    }
+    const liveCategories = await collectImageCheckCategoryItems(liveDialog)
+    const category = liveCategories.find((item) => item.label === categoryLabel)
+    if (!category || category.count <= 0) {
+      continue
+    }
+
+    const clicked = await clickImageCheckCategory(page, liveDialog, categoryLabel)
+    if (!clicked) {
+      continue
+    }
+    await page.waitForTimeout(300)
+    const categoryDialog = await requireFreshImageCheckDialog(page, liveDialog)
+    if (!categoryDialog) {
+      return {
+        applied: false,
+        changed,
+        status: "failed",
+        reason: "image check dialog disappeared before candidate selection",
+        categories: results,
+        issues,
+        deferredVerification: null
+      }
+    }
+    const candidates = await collectImageCheckSelectionCandidates(categoryDialog)
+    const selectedCount = await selectImageCheckCandidates(page, categoryDialog)
+    const matchingIssues = uniqueImageCheckIssues(issues).filter((issue) =>
+      classifyIssueToImageCheckCategory(issue, liveCategories) === categoryLabel
+    )
+    const batchTool = inferImageCheckBatchTool(matchingIssues)
+    const requiresPostSaveVerification = batchTool === "batch-resize" && selectedCount > 0
+    const batchResult = selectedCount <= 0
+      ? {
+          applied: false,
+          reason: batchTool
+            ? `no issue images were selected before running ${batchTool}`
+            : "no issue images were selected"
+        }
+      : batchTool
+        ? await runImageCheckBatchTool(page, categoryDialog, batchTool)
+        : {
+            applied: false,
+            reason: "no official Dianxiaomi batch repair tool matched the detected image-check issue"
+          }
+    const categoryChanged = batchResult.applied
+    results.push({
+      category: categoryLabel,
+      count: category.count,
+      selectedCount,
+      changed: categoryChanged,
+      candidates,
+      batchTool,
+      batchToolApplied: batchResult.applied,
+      batchToolReason: batchResult.reason
+    })
+
+    if (requiresPostSaveVerification && categoryChanged) {
+      deferredVerificationCategories.push(categoryLabel)
+    }
+
+    if (selectedCount > 0 && batchTool && !batchResult.applied) {
+      await closeImageCheckDialogIfPresent(page)
+      return {
+        applied: false,
+        changed,
+        status: "failed",
+        reason: `${categoryLabel} official image-check repair failed: ${batchResult.reason}`,
+        categories: results,
+        issues,
+        deferredVerification: null
+      }
+    }
+
+    if (categoryChanged) {
+      changed = true
+    }
+
+    if (batchResult.applied) {
+      let recoveredDialog = await waitForImageCheckDialogStableRecovery(page, categoryDialog, 8_000)
+      if (!recoveredDialog) {
+        const reopened = await reopenImageCheckDialog(page, config)
+        recoveredDialog = reopened ? await waitForImageCheckDialog(page, 8_000) : null
+      }
+
+      if (!recoveredDialog) {
+        return {
+          applied: false,
+          changed,
+          status: "failed",
+          reason: `${categoryLabel} repair completed but image check did not return to a saveable dialog`,
+          categories: results,
+          issues
+        }
+      }
+    }
+
+    await waitForImageCheckPageToSettle(page, 3_000)
+  }
+
+  if (results.length === 0) {
+    await closeImageCheckDialogIfPresent(page)
+    return {
+      applied: false,
+      changed: false,
+      status: "no-op",
+      reason: "image check categories were not matched to actionable candidates",
+      categories: [],
+      issues,
+      deferredVerification: null
+    }
+  }
+
+  const latestDialog = await requireFreshImageCheckDialog(page, dialog)
+  if (!latestDialog) {
+    return {
+      applied: false,
+      changed,
+      status: "failed",
+      reason: "image check dialog disappeared before save",
+      categories: results,
+      issues,
+      deferredVerification: null
+    }
+  }
+  const saveResult = await saveImageCheckDialog(page, latestDialog)
+  if (!saveResult.saved) {
+    await closeImageCheckDialogIfPresent(page)
+    return {
+      applied: false,
+      changed,
+      status: "failed",
+      reason: saveResult.feedback?.message || "image check save did not succeed",
+      categories: results,
+      issues,
+      deferredVerification: null
+    }
+  }
+
+  return {
+    applied: true,
+    changed,
+    status: changed ? "applied" : "no-op",
+    reason: changed
+      ? `image check saved ${results.filter((item) => item.changed).length} official categorized repair(s)`
+      : "image check saved without any official categorized repair",
+    categories: results,
+    issues,
+    deferredVerification: deferredVerificationCategories.length > 0
+      ? {
+          required: true,
+          categoryLabels: deferredVerificationCategories
+        }
+      : null
+  }
+}
+
+const waitForBatchResizeCompletion = async (
+  page: Page,
+  root: Locator | null,
+  targetSidePx = BATCH_RESIZE_TARGET_SIDE_PX,
+  timeoutMs = BATCH_RESIZE_COMPLETION_TIMEOUT_MS,
+  previousFeedback?: MediaApplyFeedback | null,
+  duplicateFeedbackGraceMs = 2_500
+): Promise<MediaApplyFeedback> => {
+  const startedAt = Date.now()
+  const targetPattern = new RegExp(`${targetSidePx}\\s*[xX×]\\s*${targetSidePx}`)
+  let latest: MediaApplyFeedback = {
+    state: "unknown",
+    message: "",
+    source: "none"
+  }
+
+  while (Date.now() - startedAt < timeoutMs) {
+    latest = await readMediaApplyFeedback(page, root)
+    if (latest.state !== "unknown") {
+      const feedbackText = normalizeFeedbackText(latest.message)
+      if (
+        latest.state === "success"
+        && keywordMatch(feedbackText, BATCH_RESIZE_PROGRESS_KEYWORDS)
+      ) {
+        latest = {
+          state: "unknown",
+          message: latest.message,
+          source: latest.source
+        }
+      } else if (!sameMediaApplyFeedback(latest, previousFeedback) || Date.now() - startedAt >= duplicateFeedbackGraceMs) {
+        return latest
+      }
+    }
+
+    if (root && !await root.isVisible().catch(() => false)) {
+      return {
+        state: "unknown",
+        message: "batch resize dialog closed before a stable success toast appeared",
+        source: "dialog-close"
+      }
+    }
+
+    const surfaceText = root ? normalizeFeedbackText(await root.innerText().catch(() => "")) : ""
+    const dialogs = await visibleDialogLocators(page)
+    const latestDialogText = dialogs.length > 0
+      ? normalizeFeedbackText(await dialogs[dialogs.length - 1].innerText().catch(() => ""))
+      : ""
+    if (
+      targetPattern.test(surfaceText)
+      && !keywordMatch(surfaceText, BATCH_RESIZE_PROGRESS_KEYWORDS)
+      && (
+        latestDialogText.length === 0
+        || !keywordMatch(latestDialogText, BATCH_RESIZE_PROGRESS_KEYWORDS)
+        || Boolean(await getImageCheckDialog(page))
+      )
+    ) {
+      return {
+        state: "success",
+        message: `batch resize generated images at ${targetSidePx} X ${targetSidePx}`,
+        source: "media-surface"
+      }
+    }
+
+    await page.waitForTimeout(750)
+  }
+
+  return latest
+}
+
+// Real Dianxiaomi sometimes closes the batch-resize dialog and returns to the
+// listing editor without emitting a stable success toast. Treat that as a
+// success only when the dialog stack returns to baseline on the same page and
+// no failure feedback appears during the recovery window.
+const waitForBatchResizeReturnToEditor = async (
+  page: Page,
+  baselineVisibleDialogs: number,
+  beforeUrl: string | null | undefined,
+  timeoutMs = 8_000
+): Promise<MediaApplyFeedback | null> => {
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const visibleDialogs = (await visibleDialogLocators(page)).length
+    if (visibleDialogs <= baselineVisibleDialogs) {
+      const feedback = await readMediaApplyFeedback(page, null, "batch-resize")
+      if (feedback.state === "failure") {
+        return feedback
+      }
+
+      if (isSameDianxiaomiEditPage(beforeUrl, page.url())) {
+        return {
+          state: "success",
+          message: "batch resize dialog closed and returned to the listing editor",
+          source: "dialog-close"
+        }
+      }
+    }
+
+    await page.waitForTimeout(250)
+  }
+
+  return null
+}
+
 const inspectMediaSurface = async (
   page: Page,
   tool: Pick<MediaToolDefinition, "keywords" | "label">
@@ -1540,34 +9713,158 @@ const inspectMediaSurface = async (
   }
 }
 
+// P0-D + P0-F: apply path for instant-action tools (e.g. 一键翻译, 图片检测).
+// The tool entry has already been clicked before this is called. We:
+//   1) snapshot the listing image signature (P0-F evidence baseline)
+//   2) wait for an in-page success/failure keyword
+//   3) snapshot the image signature again
+//   4) record whether the listing image DOM actually changed
+//   5) declare `applied=true` only when keyword success AND signature delta
+const applyInstantMediaAction = async (
+  page: Page,
+  tool: MediaToolSafetyItem,
+  options: Pick<RunnerOptions, "screenshotDir">
+) => {
+  const signatureBefore = await collectImageSignature(page)
+  tool.imageSignatureBefore = signatureBefore
+  tool.beforeApplyScreenshotPath = await captureMediaScreenshot(page, options.screenshotDir, "media-before-apply", tool.id)
+
+  const feedback = await waitForInstantActionFeedback(page, 8_000)
+  const signatureAfter = await collectImageSignature(page)
+  tool.imageSignatureAfter = signatureAfter
+  tool.imageSignatureChanged = signatureBefore !== signatureAfter
+  tool.afterApplyScreenshotPath = await captureMediaScreenshot(page, options.screenshotDir, "media-after-apply", tool.id)
+  tool.feedbackState = feedback.state
+  tool.feedbackMessage = feedback.message
+  tool.feedbackSource = feedback.source
+  if (tool.id === "image-management") {
+    tool.imageCheckIssues = extractImageCheckIssues(feedback.message)
+  }
+
+  if (tool.id === "image-management" && (tool.imageCheckIssues?.length ?? 0) > 0) {
+    tool.applied = false
+    tool.status = "apply-failed"
+    tool.reason = `${tool.label} found categorized image issues: ${tool.imageCheckIssues!.map((issue) => `${issue.category} ${issue.issue}`).join(", ")}`
+    tool.failureKind = "invalid-media"
+    tool.retryable = false
+    tool.error = feedback.message || tool.reason
+    return false
+  }
+
+  if (feedback.state === "failure") {
+    const failure = classifyMediaFailure(feedback.message || "media instant action returned failure feedback")
+    tool.applied = false
+    tool.status = "apply-failed"
+    tool.reason = `${tool.label} instant action returned failure feedback: ${feedback.message}`
+    tool.failureKind = failure.failureKind
+    tool.retryable = failure.retryable
+    tool.error = feedback.message
+    return false
+  }
+
+  if (feedback.state === "success") {
+    if (tool.imageSignatureChanged === true) {
+      tool.applied = true
+      tool.status = "applied"
+      tool.reason = `${tool.label} instant action verified by listing image signature change`
+      tool.failureKind = undefined
+      tool.retryable = false
+      tool.error = null
+      return true
+    }
+
+    // Keyword success but signature unchanged — possible if the tool did
+    // something we don't measure (translation, detection). Record the gap
+    // and still treat as applied.
+    tool.applied = true
+    tool.status = "applied"
+    tool.reason = `${tool.label} instant action reported success but listing image signature did not change`
+    tool.failureKind = "image-unchanged"
+    tool.retryable = false
+    tool.error = null
+    return true
+  }
+
+  // unknown — no positive or negative keyword within the timeout.
+  tool.applied = false
+  tool.status = "apply-failed"
+  tool.reason = `${tool.label} instant action did not produce a recognizable success/failure keyword within 8s`
+  tool.failureKind = "image-unchanged"
+  tool.retryable = false
+  tool.error = "no instant action feedback detected"
+  return false
+}
+
 const closeMediaSurfaceIfOpen = async (
   page: Page,
   config: DianxiaomiSelectorConfig = {},
   tool?: Pick<MediaToolDefinition, "configKey">
 ) => {
-  const dialogs = await visibleDialogLocators(page)
+  const dialogs = await visibleModalCandidates(page)
   const surface = dialogs[dialogs.length - 1]
   if (!surface) {
     return false
   }
 
+  const surfaceText = normalizeFeedbackText(await surface.innerText().catch(() => ""))
+  const parsedTranslationFeedback = parseImageTranslationFeedback(surfaceText)
+  const looksLikeImageTranslationResultSurface =
+    parsedTranslationFeedback.mentionsTranslationSummary
+    || parsedTranslationFeedback.inProgress
+    || Boolean(keywordMatch(surfaceText, IMAGE_TRANSLATION_RESULT_DIALOG_HINTS))
+    || Boolean(keywordMatch(surfaceText, IMAGE_TRANSLATION_RESULT_READY_KEYWORDS))
+
   const closeButton = (tool
     ? await findByConfiguredSelectorsInRoot(surface, getConfiguredMediaActionSelectors(config, "close", tool))
     : null)
+    ?? await firstVisible([
+      surface.locator("button").filter({ hasText: /^(?:关闭|关 闭|close|cancel|返回)$/i }),
+      surface.locator("[role='button']").filter({ hasText: /^(?:关闭|关 闭|close|cancel|返回)$/i }),
+      surface.locator("a").filter({ hasText: /^(?:关闭|关 闭|close|cancel|返回)$/i })
+    ])
     ?? await findInteractiveInRootByKeywords(surface, MEDIA_CLOSE_KEYWORDS)
     ?? await firstVisible([
       surface.locator("[aria-label*='close' i]"),
       surface.locator("[title*='close' i]"),
       surface.locator(".ant-modal-close, .el-dialog__headerbtn, .modal-close, [class*='close' i]")
     ])
+    ?? (looksLikeImageTranslationResultSurface
+      ? await findInteractiveInRootByKeywords(surface, IMAGE_TRANSLATION_RESULT_CONFIRM_KEYWORDS)
+      : null)
+    ?? await findLastVisibleActionInRoot(surface)
 
   if (!closeButton) {
     return false
   }
 
-  await closeButton.click()
-  await page.waitForTimeout(500)
-  return true
+  const targetDialogCount = Math.max(0, dialogs.length - 1)
+  await clickAfterDianxiaomiIdle(page, closeButton, 2)
+  return waitForVisibleDialogCountAtMost(page, targetDialogCount)
+}
+
+const closeMediaSurfaceStackToBaseline = async (
+  page: Page,
+  baselineVisibleDialogs: number,
+  config: DianxiaomiSelectorConfig = {},
+  tool?: Pick<MediaToolDefinition, "configKey">
+) => {
+  let currentDialogCount = (await getPageSafetyState(page)).visibleDialogCount
+  let attempts = 0
+
+  while (currentDialogCount > baselineVisibleDialogs && attempts < 4) {
+    const closed = await closeMediaSurfaceIfOpen(page, config, tool)
+    await page.waitForTimeout(300)
+    const nextDialogCount = (await getPageSafetyState(page)).visibleDialogCount
+    attempts += 1
+
+    if (!closed && nextDialogCount >= currentDialogCount) {
+      break
+    }
+
+    currentDialogCount = nextDialogCount
+  }
+
+  return (await getPageSafetyState(page)).visibleDialogCount <= baselineVisibleDialogs
 }
 
 const captureMediaScreenshot = async (page: Page, screenshotDir: string, prefix: string, toolId: string) => {
@@ -1682,12 +9979,12 @@ const openUnattendedMediaTools = async (
     return plan
   }
 
-  const candidates = await collectMediaToolCandidates(page, config)
   for (const tool of plan.tools) {
     if (!tool.wouldClick) {
       continue
     }
 
+    const candidates = await collectMediaToolCandidates(page, config)
     const candidate = candidates.find((item) => item.id === tool.id)
     if (!candidate?.locator) {
       tool.status = "missing-tool"
@@ -1700,8 +9997,7 @@ const openUnattendedMediaTools = async (
     tool.beforeDialogCount = (await getPageSafetyState(page)).visibleDialogCount
 
     try {
-      await candidate.locator.scrollIntoViewIfNeeded()
-      await candidate.locator.click()
+      await clickAfterDianxiaomiIdle(page, candidate.locator)
       await page.waitForTimeout(800)
       const afterState = await getPageSafetyState(page)
       const screenshotPath = path.join(
@@ -1750,7 +10046,6 @@ const applyUnattendedMediaTools = async (
     return plan
   }
 
-  const candidates = await collectMediaToolCandidates(page, config)
   let blockedByPriorFailure = false
   for (const tool of plan.tools) {
     if (!tool.wouldApply) {
@@ -1781,6 +10076,7 @@ const applyUnattendedMediaTools = async (
       continue
     }
 
+    const candidates = await collectMediaToolCandidates(page, config)
     const candidate = candidates.find((item) => item.id === tool.id)
     if (!candidate?.locator) {
       tool.status = "missing-tool"
@@ -1794,8 +10090,7 @@ const applyUnattendedMediaTools = async (
     tool.beforeDialogCount = (await getPageSafetyState(page)).visibleDialogCount
 
     try {
-      await candidate.locator.scrollIntoViewIfNeeded()
-      await candidate.locator.click()
+      await clickAfterDianxiaomiIdle(page, candidate.locator)
       await page.waitForTimeout(800)
       const afterOpenState = await getPageSafetyState(page)
       tool.clicked = true
@@ -1803,24 +10098,64 @@ const applyUnattendedMediaTools = async (
       tool.afterDialogCount = afterOpenState.visibleDialogCount
       tool.screenshotPath = await captureMediaScreenshot(page, options.screenshotDir, "media-open", tool.id)
 
-      const surfaceInspection = await inspectMediaSurface(page, candidate)
-      tool.surfaceState = surfaceInspection.state
-      tool.surfaceMatchedKeyword = surfaceInspection.matchedKeyword
-      tool.surfaceText = surfaceInspection.text
-      if (surfaceInspection.state !== "matched") {
-        const failure = surfaceInspection.state === "missing"
+      // P0-D: instant-action tools (image-translation, image-management) act
+      // on the page in place rather than opening a closeable dialog. When no
+      // dialog appears and the tool is in the instant-action allowlist, hand
+      // off to the instant apply path and skip the dialog/apply-button flow.
+      if (INSTANT_ACTION_TOOL_IDS.has(tool.id) && afterOpenState.visibleDialogCount === 0) {
+        tool.surfaceState = "missing"
+        const instantApplied = await applyInstantMediaAction(page, tool, options)
+        tool.feedbackAttempts = []
+        tool.maxApplyAttempts = 1
+        if (!instantApplied) {
+          blockedByPriorFailure = true
+        }
+        continue
+      }
+
+      if (tool.id === "batch-resize") {
+        const prepared = await prepareBatchResizeDialog(page, tool)
+        const mediaSurface = await getLatestMediaDialog(page)
+        tool.surfaceState = prepared ? "matched" : "mismatched"
+        tool.surfaceMatchedKeyword = prepared ? "batch-resize-controls" : null
+        tool.surfaceText = mediaSurface ? normalizeFeedbackText(await mediaSurface.innerText().catch(() => "")) : ""
+      } else {
+        const surfaceInspection = await inspectMediaSurface(page, candidate)
+        tool.surfaceState = surfaceInspection.state
+        tool.surfaceMatchedKeyword = surfaceInspection.matchedKeyword
+        tool.surfaceText = surfaceInspection.text
+      }
+
+      if (tool.surfaceState !== "matched") {
+        const failure = tool.surfaceState === "missing"
           ? { failureKind: "surface-missing" as const, retryable: false }
           : { failureKind: "surface-mismatch" as const, retryable: false }
         tool.applied = false
         tool.status = "apply-failed"
-        tool.reason = surfaceInspection.state === "missing"
+        tool.reason = tool.surfaceState === "missing"
           ? `${tool.label} entry was clicked, but no media surface opened`
           : `${tool.label} entry opened an unexpected media surface`
         tool.beforeApplyScreenshotPath = await captureMediaScreenshot(page, options.screenshotDir, "media-surface-mismatch", tool.id)
         tool.failureKind = failure.failureKind
         tool.retryable = failure.retryable
-        tool.error = surfaceInspection.state === "missing" ? "media surface missing" : "media surface mismatch"
-        await closeMediaSurfaceIfOpen(page, config, tool)
+        tool.error = tool.surfaceState === "missing" ? "media surface missing" : "media surface mismatch"
+        await closeMediaSurfaceStackToBaseline(page, tool.beforeDialogCount ?? 0, config, tool)
+        await page.waitForTimeout(500)
+        tool.returnDialogCount = (await getPageSafetyState(page)).visibleDialogCount
+        blockedByPriorFailure = true
+        continue
+      }
+
+      if (tool.id === "batch-resize" && tool.preparation?.prepared !== true) {
+        const failure = classifyMediaFailure("batch resize preparation failed", "missing-input")
+        tool.applied = false
+        tool.status = "apply-failed"
+        tool.reason = `${tool.label} dialog opened, but required resize inputs could not be prepared`
+        tool.beforeApplyScreenshotPath = await captureMediaScreenshot(page, options.screenshotDir, "media-prepare-failed", tool.id)
+        tool.failureKind = failure.failureKind
+        tool.retryable = failure.retryable
+        tool.error = "batch resize preparation failed"
+        await closeMediaSurfaceStackToBaseline(page, tool.beforeDialogCount ?? 0, config, tool)
         await page.waitForTimeout(500)
         tool.returnDialogCount = (await getPageSafetyState(page)).visibleDialogCount
         blockedByPriorFailure = true
@@ -1841,7 +10176,7 @@ const applyUnattendedMediaTools = async (
         tool.failureKind = failure.failureKind
         tool.retryable = failure.retryable
         tool.error = "apply button missing"
-        await closeMediaSurfaceIfOpen(page, config, tool)
+        await closeMediaSurfaceStackToBaseline(page, tool.beforeDialogCount ?? 0, config, tool)
         await page.waitForTimeout(500)
         tool.returnDialogCount = (await getPageSafetyState(page)).visibleDialogCount
         blockedByPriorFailure = true
@@ -1849,6 +10184,10 @@ const applyUnattendedMediaTools = async (
       }
 
       tool.beforeApplyScreenshotPath = await captureMediaScreenshot(page, options.screenshotDir, "media-before-apply", tool.id)
+      // P0-F: capture listing image signature before apply. Soft evidence
+      // for dialog-based tools (recorded, not enforced). The instant-action
+      // branch enforces this delta in `applyInstantMediaAction`.
+      tool.imageSignatureBefore = await collectImageSignature(page)
       tool.maxApplyAttempts = MEDIA_TRANSIENT_MAX_APPLY_ATTEMPTS
       tool.feedbackAttempts = []
 
@@ -1859,12 +10198,47 @@ const applyUnattendedMediaTools = async (
       }
       let failure: ReturnType<typeof classifyMediaFailure> | null = null
       let previousFeedback: MediaApplyFeedback | null = null
+      const imageTranslationQuotaBefore = tool.id === "image-translation"
+        ? extractImageTranslationQuotaCount(await mediaSurface.innerText().catch(() => ""))
+        : null
 
       for (let attempt = 1; attempt <= MEDIA_TRANSIENT_MAX_APPLY_ATTEMPTS; attempt += 1) {
         tool.applyAttempts = attempt
-        await applyButton.scrollIntoViewIfNeeded()
-        await applyButton.click()
-        feedback = await waitForMediaApplyFeedback(page, mediaSurface, 8_000, previousFeedback)
+        await clickAfterDianxiaomiIdle(page, applyButton)
+        if (tool.id === "image-translation") {
+          await completeImageTranslationFinalActionIfPresent(page, applyButton)
+        }
+        feedback = tool.id === "batch-resize"
+          ? await waitForBatchResizeCompletion(
+            page,
+            mediaSurface,
+            BATCH_RESIZE_TARGET_SIDE_PX,
+            BATCH_RESIZE_COMPLETION_TIMEOUT_MS,
+            previousFeedback
+          )
+          : await waitForMediaApplyFeedback(page, mediaSurface, tool.id === "image-translation" ? 90_000 : 8_000, tool.id, previousFeedback)
+        if (tool.id === "batch-resize" && feedback.state === "unknown") {
+          const returnToEditorFeedback = await waitForBatchResizeReturnToEditor(
+            page,
+            tool.beforeDialogCount ?? 0,
+            tool.beforeUrl
+          )
+          if (returnToEditorFeedback) {
+            feedback = returnToEditorFeedback
+          }
+        }
+        if (tool.id === "image-translation" && feedback.state === "unknown") {
+          const quotaFeedback = await waitForImageTranslationSubmissionSignal(page, mediaSurface, imageTranslationQuotaBefore, 8_000)
+          if (quotaFeedback) {
+            feedback = quotaFeedback
+          }
+        }
+        if (tool.id === "image-translation" && shouldWaitForImageTranslationResultDialog(feedback)) {
+          const resultDialogFeedback = await waitForImageTranslationResultDialog(page, 180_000)
+          if (resultDialogFeedback) {
+            feedback = resultDialogFeedback
+          }
+        }
         previousFeedback = feedback
 
         failure = feedback.state === "success"
@@ -1911,7 +10285,7 @@ const applyUnattendedMediaTools = async (
         tool.failureKind = failure.failureKind
         tool.retryable = failure.retryable
         tool.error = feedback.message || "media apply success feedback not detected"
-        await closeMediaSurfaceIfOpen(page, config, tool)
+        await closeMediaSurfaceStackToBaseline(page, tool.beforeDialogCount ?? 0, config, tool)
         await page.waitForTimeout(500)
         tool.returnDialogCount = (await getPageSafetyState(page)).visibleDialogCount
         blockedByPriorFailure = true
@@ -1919,10 +10293,18 @@ const applyUnattendedMediaTools = async (
       }
 
       tool.applied = true
+      if (tool.id === "image-translation") {
+        await finalizeImageTranslationResultIfPresent(page)
+      }
 
-      await closeMediaSurfaceIfOpen(page, config, tool)
+      await closeMediaSurfaceStackToBaseline(page, tool.beforeDialogCount ?? 0, config, tool)
       await page.waitForTimeout(500)
       tool.returnDialogCount = (await getPageSafetyState(page)).visibleDialogCount
+      // P0-F: capture listing image signature after apply. Soft evidence for
+      // dialog-based tools (recorded, not enforced). The instant-action
+      // branch enforces this delta in `applyInstantMediaAction`.
+      tool.imageSignatureAfter = await collectImageSignature(page)
+      tool.imageSignatureChanged = tool.imageSignatureBefore !== tool.imageSignatureAfter
       if ((tool.returnDialogCount ?? 0) > 0) {
         const failure = classifyMediaFailure("media surface remained open after apply", "return-blocked")
         tool.status = "return-failed"
@@ -2011,9 +10393,7 @@ export const planMediaProcessing = async (
     .map((step) => step.id.replace("inspect-media-", ""))
   const recommendedOrder = [
     "image-translation",
-    "batch-resize",
-    "white-background",
-    "image-editor"
+    "batch-resize"
   ]
   const availableActions = recommendedOrder.filter((tool) => foundTools.includes(tool))
 
@@ -2405,9 +10785,440 @@ const applyRepairSkuPricing = async (
   )
 }
 
+const inferImageCheckIssuesFromRepairAction = (action: DianxiaomiProductRepairAction): ImageCheckIssue[] => {
+  const candidates = [
+    action.detail,
+    action.payload?.expectedValue,
+    [action.target, action.tool].filter(Boolean).join(" ")
+  ]
+    .map((value) => cleanVisibleText(value))
+    .filter(Boolean)
+
+  const issues = candidates.flatMap((value) => extractImageCheckIssues(value))
+  if (issues.length > 0) {
+    return uniqueImageCheckIssues(issues)
+  }
+
+  const match = cleanVisibleText(action.detail).match(/(.+?)\s+(非英文|非英语|中文|文字|水印|尺寸|比例|宽高|像素|大小|格式|过大|失效)$/)
+  if (!match) {
+    return []
+  }
+
+  return [{
+    category: match[1].trim(),
+    issue: match[2].trim(),
+    detail: cleanVisibleText(action.detail)
+  }]
+}
+
+const isImageCheckDirectSkuReplacementIssue = (issue: ImageCheckIssue) => {
+  const combined = cleanVisibleText(`${issue.category} ${issue.issue} ${issue.detail ?? ""}`).toLowerCase()
+  const normalizedIssue = cleanVisibleText(issue.issue).toLowerCase()
+  const normalizedCategory = cleanVisibleText(issue.category).toLowerCase()
+
+  const isSizeLike = normalizedIssue === "\u5c3a\u5bf8"
+    || normalizedIssue === "\u6bd4\u4f8b"
+    || normalizedIssue === "\u5bbd\u9ad8"
+    || normalizedIssue === "\u50cf\u7d20"
+    || /(?:\u5c3a\u5bf8|\u6bd4\u4f8b|\u5bbd\u9ad8|\u50cf\u7d20|size|ratio|aspect|resolution)/i.test(combined)
+  const isSkuOrColorLike = normalizedCategory === "\u989c\u8272\u56fe"
+    || normalizedCategory === "sku\u56fe"
+    || /(?:\u989c\u8272\u56fe|sku\u56fe|color image|sku image)/i.test(combined)
+
+  return isSizeLike && isSkuOrColorLike
+}
+
+const isImageCheckSquarePreviewReplacementIssue = (issue: ImageCheckIssue) => {
+  const combined = cleanVisibleText(`${issue.category} ${issue.issue} ${issue.detail ?? ""}`).toLowerCase()
+  const normalizedIssue = cleanVisibleText(issue.issue).toLowerCase()
+  const normalizedCategory = cleanVisibleText(issue.category).toLowerCase()
+
+  const isSizeLike = normalizedIssue === "\u5c3a\u5bf8"
+    || normalizedIssue === "\u6bd4\u4f8b"
+    || normalizedIssue === "\u5bbd\u9ad8"
+    || normalizedIssue === "\u50cf\u7d20"
+    || /(?:\u5c3a\u5bf8|\u6bd4\u4f8b|\u5bbd\u9ad8|\u50cf\u7d20|size|ratio|aspect|resolution)/i.test(combined)
+  const isProductPreviewLike = normalizedCategory === "\u4ea7\u54c1\u56fe"
+    || normalizedCategory === "\u4e3b\u56fe"
+    || normalizedCategory === "\u7d20\u6750\u56fe"
+    || normalizedCategory === "\u9884\u89c8\u56fe"
+    || /(?:\u4ea7\u54c1\u56fe|\u4e3b\u56fe|\u7d20\u6750\u56fe|\u9884\u89c8\u56fe|product image|main image|material image|preview image)/i.test(combined)
+
+  return isSizeLike && isProductPreviewLike
+}
+
+const inferImageCheckDirectReplacementMode = (
+  issues: ImageCheckIssue[],
+  directCandidates: ImageCheckSelectionCandidate[] = []
+) => {
+  const hasColorTypedCandidate = directCandidates.some((candidate) =>
+    /(?:\u989c\u8272\u56fe|sku\u56fe|color image|sku image)/i.test(cleanVisibleText(candidate.imageType ?? candidate.label))
+  )
+  if (
+    hasColorTypedCandidate
+    && issues.some((issue) => isImageCheckSquarePreviewReplacementIssue(issue))
+  ) {
+    return "strict-color" as const
+  }
+  if (issues.some((issue) => isImageCheckSquarePreviewReplacementIssue(issue))) {
+    return "square-preview-all-colors" as const
+  }
+  if (issues.some((issue) => isImageCheckDirectSkuReplacementIssue(issue))) {
+    return "strict-color" as const
+  }
+  return null
+}
+
+const shouldUseDirectSkuReplacementFromImageCheck = (issues: ImageCheckIssue[]) =>
+  inferImageCheckDirectReplacementMode(issues) !== null
+
+const shouldRouteThroughImageCheckSelection = (
+  mediaTool: string,
+  reasonCode: string | undefined,
+  issues: ImageCheckIssue[]
+) =>
+  mediaTool === "imageManagement"
+  || (
+    reasonCode === "requirement-image-check"
+    && issues.length > 0
+    && (
+      mediaTool === "batchResize"
+      || inferImageCheckDirectReplacementMode(issues) !== null
+    )
+  )
+
+const collectVisibleListingImageCandidates = async (page: Page): Promise<string[]> =>
+  page.evaluate((selector) => {
+    const isVisible = (node: Element) => {
+      if (!(node instanceof HTMLElement)) {
+        return false
+      }
+
+      const style = window.getComputedStyle(node)
+      const rect = node.getBoundingClientRect()
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0
+    }
+
+    const urls = Array.from(document.querySelectorAll(selector))
+      .filter((node) => isVisible(node))
+      .map((node) => (node as HTMLImageElement).currentSrc || (node as HTMLImageElement).src || "")
+      .map((value) => value.trim())
+      .filter((value) => /^https?:\/\//i.test(value))
+
+    return Array.from(new Set(urls))
+  }, LISTING_IMAGE_SELECTOR).catch(() => [] as string[])
+
+const buildSkuReplacementCandidateUrls = async (
+  page: Page,
+  dialog: Locator | null,
+  issues: ImageCheckIssue[]
+) => {
+  const directCandidates = dialog ? await collectImageCheckSelectionCandidates(dialog) : []
+  const candidateImageTypeHints = issues.some((issue) =>
+    /(?:\u989c\u8272\u56fe|color image)/i.test(cleanVisibleText(`${issue.category} ${issue.detail ?? ""}`))
+  )
+
+  const directCardUrls = directCandidates
+    .filter((candidate) => candidate.src)
+    .filter((candidate) =>
+      candidateImageTypeHints
+        ? /(?:\u989c\u8272\u56fe|color image)/i.test(candidate.imageType ?? "")
+        : true
+    )
+    .map((candidate) => candidate.src!.trim())
+    .filter(Boolean)
+
+  const listingImageUrls = await collectVisibleListingImageCandidates(page)
+  return Array.from(new Set([
+    ...directCardUrls,
+    ...listingImageUrls
+  ]))
+}
+
+const runImageManagementRepairSelection = async (
+  page: Page,
+  action: DianxiaomiProductRepairAction,
+  draft: ListingDraft,
+  config: DianxiaomiSelectorConfig,
+  options: Pick<RunnerOptions, "screenshotDir"> | undefined,
+  requestedIssues: ImageCheckIssue[]
+) => {
+  const repairPageUrl = page.url()
+  const beforeDialogCount = (await getPageSafetyState(page)).visibleDialogCount
+  let dialog: Locator | null = null
+  let openScreenshotPath: string | null = null
+  let afterOpenState = await getPageSafetyState(page)
+  let openAttempts = 0
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    openAttempts = attempt
+    await dismissSaveSuccessModalIfPresent(page)
+    await waitForPublishPage(page, config, {
+      waitForManualNavigation: false,
+      targetUrl: page.url()
+    })
+    await waitForImageCheckPageToSettle(page, 12_000)
+    const candidates = await collectMediaToolCandidates(page, config)
+    const candidate = candidates.find((item) => item.id === "image-management")
+    if (!candidate?.locator) {
+      if (attempt === 3) {
+        return stepResult(
+          "repair-image-management-selection",
+          "Repair image-check selection",
+          "failed",
+          "Image check entry disappeared before categorized repair selection",
+          {
+            requestedIssues,
+            openAttempts
+          }
+        )
+      }
+      await page.waitForTimeout(1_000)
+      continue
+    }
+
+    try {
+      await clickAfterDianxiaomiIdle(page, candidate.locator)
+    } catch {
+      await page.waitForTimeout(1_000)
+      continue
+    }
+
+    await waitForImageCheckPageToSettle(page, 12_000)
+    await page.waitForTimeout(800)
+    afterOpenState = await getPageSafetyState(page)
+    openScreenshotPath = await captureMediaScreenshot(
+      page,
+      options?.screenshotDir ?? "output/playwright",
+      "repair-image-check-open",
+      "image-management"
+    )
+    dialog = await waitForImageCheckDialog(page, attempt === 1 ? 8_000 : 5_000)
+    if (dialog) {
+      break
+    }
+
+    await waitForImageCheckPageToSettle(page, 12_000)
+    dialog = await waitForImageCheckDialog(page, 4_000)
+    if (dialog) {
+      break
+    }
+
+    await page.waitForTimeout(1_500)
+  }
+
+  if (!dialog) {
+    return stepResult(
+      "repair-image-management-selection",
+      "Repair image-check selection",
+      "failed",
+      "Image check dialog did not open for categorized repair selection",
+      {
+        requestedIssues,
+        beforeDialogCount,
+        afterOpenState,
+        openScreenshotPath,
+        openAttempts
+      }
+    )
+  }
+
+  const surfaceText = normalizeFeedbackText(await dialog.innerText().catch(() => ""))
+  const surfacedIssues = uniqueImageCheckIssues(extractImageCheckIssues(surfaceText))
+  const positiveSummaryIssues = uniqueImageCheckIssues(extractPositiveImageCheckSummaryIssues(surfaceText))
+  const requestedIssuesPresentInSummary = filterRequestedImageCheckIssuesBySummary(requestedIssues, positiveSummaryIssues)
+  const effectiveIssues = requestedIssues.length > 0
+    ? requestedIssuesPresentInSummary
+    : positiveSummaryIssues.length > 0
+      ? positiveSummaryIssues
+      : surfacedIssues
+
+  if (requestedIssues.length > 0 && requestedIssuesPresentInSummary.length === 0) {
+    await closeImageCheckDialogIfPresent(page)
+    return stepResult(
+      "repair-image-management-selection",
+      "Repair image-check selection",
+      "skipped",
+      "Image check summary shows no matching positive issues; skipped automatic image replacement",
+      {
+        requestedIssues,
+        surfacedIssues,
+        positiveSummaryIssues,
+        beforeDialogCount,
+        afterOpenState,
+        openScreenshotPath,
+        openAttempts
+      }
+    )
+  }
+
+  if (effectiveIssues.length === 0) {
+    await closeImageCheckDialogIfPresent(page)
+    return stepResult(
+      "repair-image-management-selection",
+      "Repair image-check selection",
+      "skipped",
+      "Image check summary shows no actionable positive issues",
+      {
+        requestedIssues,
+        surfacedIssues,
+        positiveSummaryIssues,
+        beforeDialogCount,
+        afterOpenState,
+        openScreenshotPath,
+        openAttempts
+      }
+    )
+  }
+  const visibleCategories = await collectImageCheckCategoryItems(dialog)
+  const directCandidates = await collectImageCheckSelectionCandidates(dialog)
+  const directReplacementMode = inferImageCheckDirectReplacementMode(effectiveIssues, directCandidates)
+  const directReplacementRequested = directReplacementMode !== null
+  let selection: ImageCheckApplySummary
+
+  if (directReplacementRequested) {
+    const replacementUrls = await buildSkuReplacementCandidateUrls(page, dialog, effectiveIssues)
+    await closeImageCheckDialogIfPresent(page)
+    await waitForPublishPage(page, config, {
+      waitForManualNavigation: false,
+      targetUrl: page.url()
+    })
+    const replacementResult = await fillSkuImageLinks(page, replacementUrls, {
+      maxRows: 40,
+      screenshotDir: options?.screenshotDir,
+      screenshotPrefix: directReplacementMode === "square-preview-all-colors"
+        ? "repair-image-check-square-preview-replace"
+        : "repair-image-check-sku-replace",
+      mode: directReplacementMode ?? "strict-color"
+    })
+    selection = {
+      applied: replacementResult.status === "done",
+      changed: replacementResult.status === "done",
+      status: replacementResult.status === "done" ? "applied" : "failed",
+      reason: replacementResult.status === "done"
+        ? directReplacementMode === "square-preview-all-colors"
+          ? "image check product-size issue routed to square preview replacement across all color rows"
+          : "image check color-size issue routed to direct SKU image network replacement"
+        : directReplacementMode === "square-preview-all-colors"
+          ? `image check product-size issue could not be fixed by square preview replacement: ${replacementResult.detail}`
+          : `image check color-size issue could not be fixed by direct SKU image replacement: ${replacementResult.detail}`,
+      categories: [],
+      issues: effectiveIssues,
+      directReplacement: {
+        applied: replacementResult.status === "done",
+        reason: replacementResult.detail,
+        imageUrls: replacementUrls,
+        writerResult: replacementResult
+      },
+      deferredVerification: replacementResult.status === "done"
+        ? {
+            required: true,
+            categoryLabels: Array.from(new Set(
+              uniqueImageCheckIssues(effectiveIssues)
+                .map((issue) => classifyIssueToImageCheckCategory(issue, visibleCategories))
+                .filter((label): label is string => Boolean(label))
+            ))
+          }
+        : null
+    }
+  } else {
+    selection = await applyImageCheckSelections(
+      page,
+      config,
+      effectiveIssues
+    )
+  }
+  const afterScreenshotPath = await captureMediaScreenshot(
+    page,
+    options?.screenshotDir ?? "output/playwright",
+    "repair-image-check-after",
+    "image-management"
+  )
+  let pageSavePreparation: AutomationStepResult | null = null
+  let pageSave: AutomationStepResult | null = null
+  let afterPageSaveScreenshotPath: string | null = null
+  let postPageSaveVerification: Awaited<ReturnType<typeof verifyImageCheckCategoriesResolvedAfterSave>> | null = null
+  if (selection.status !== "failed" && selection.changed) {
+    pageSavePreparation = await prepareRepairMediaPageSave(page, draft, config)
+    pageSave = await saveDraftWithVerification(page, config, 2)
+    afterPageSaveScreenshotPath = await captureMediaScreenshot(
+      page,
+      options?.screenshotDir ?? "output/playwright",
+      "repair-image-check-after-page-save",
+      "image-management"
+    )
+    if (pageSave.status === "done" && selection.deferredVerification?.required) {
+      postPageSaveVerification = await verifyImageCheckCategoriesResolvedAfterSave(
+        page,
+        config,
+        selection.deferredVerification.categoryLabels,
+        {
+          targetUrl: repairPageUrl
+        }
+      )
+      selection.deferredVerification = {
+        ...selection.deferredVerification,
+        verified: postPageSaveVerification.verified,
+        remainingCategories: postPageSaveVerification.remainingCategories,
+        surfacedIssues: postPageSaveVerification.surfacedIssues,
+        reason: !postPageSaveVerification.verified
+          ? postPageSaveVerification.remainingCategories.some((item) => item.count < 0)
+            ? "image check saved candidate replacements, but verification dialog did not reopen"
+            : `image check saved candidate replacements, but unresolved categories remain: ${postPageSaveVerification.remainingCategories.map((item) => `${item.label}(${item.count})`).join(", ")}`
+          : "image check candidate replacements were verified after Dianxiaomi page save"
+      }
+
+      if (!postPageSaveVerification.verified && postPageSaveVerification.surfacedIssues.length > 0) {
+        selection.issues = postPageSaveVerification.surfacedIssues
+      }
+    }
+  }
+
+  const selectionStatus = selection.status === "failed" ? "failed" : selection.status === "applied" ? "done" : "skipped"
+  const finalStatus: StepStatus =
+    pageSavePreparation?.status === "failed"
+      || pageSave?.status === "failed"
+      || (selection.deferredVerification?.required === true && selection.deferredVerification.verified === false)
+      ? "failed"
+      : selectionStatus
+  const finalDetail = pageSavePreparation?.status === "failed"
+    ? `${selection.reason}; page-save preparation failed: ${pageSavePreparation.detail}`
+    : pageSave?.status === "done"
+      ? selection.deferredVerification?.required === true && selection.deferredVerification.verified === false
+        ? selection.deferredVerification.reason ?? selection.reason
+        : selection.deferredVerification?.required === true && selection.deferredVerification.verified === true
+          ? `${selection.reason}; Dianxiaomi page save and image-check verification succeeded`
+          : `${selection.reason}; Dianxiaomi page save verified`
+      : pageSave?.status === "failed"
+        ? `${selection.reason}; Dianxiaomi page save failed: ${pageSave.detail}`
+        : selection.reason
+
+  return stepResult(
+    "repair-image-management-selection",
+    "Repair image-check selection",
+    finalStatus,
+    finalDetail,
+    {
+      requestedIssues,
+      surfacedIssues,
+      beforeDialogCount,
+      afterOpenState,
+      openScreenshotPath,
+      afterScreenshotPath,
+      pageSavePreparation,
+      pageSave,
+      afterPageSaveScreenshotPath,
+      postPageSaveVerification,
+      openAttempts,
+      selection
+    }
+  )
+}
+
 const applyRepairMediaTool = async (
   page: Page,
   action: DianxiaomiProductRepairAction,
+  draft: ListingDraft,
   config: DianxiaomiSelectorConfig,
   options?: RunnerOptions
 ) => {
@@ -2417,22 +11228,66 @@ const applyRepairMediaTool = async (
   }
 
   const effectiveMode = options?.mediaAutomationMode === "unattended-apply" ? "unattended-apply" : "plan-only"
+  const requestedImageCheckIssues = action.payload?.reasonCode === "requirement-image-check"
+    ? inferImageCheckIssuesFromRepairAction(action)
+    : []
+  const routeThroughImageCheckSelection = shouldRouteThroughImageCheckSelection(
+    mediaTool,
+    action.payload?.reasonCode,
+    requestedImageCheckIssues
+  )
+
+  if (routeThroughImageCheckSelection) {
+    const selectionResult = effectiveMode === "unattended-apply"
+      ? await runImageManagementRepairSelection(page, action, draft, config, options, requestedImageCheckIssues)
+      : stepResult(
+        "repair-image-management-selection",
+        "Repair image-check selection",
+        "skipped",
+        "Image-check repair stayed in plan-only mode"
+      )
+
+    return repairApplyResult(
+      action,
+      selectionResult.status,
+      selectionResult.detail,
+      {
+        mediaTool,
+        mode: effectiveMode,
+        requestedImageCheckIssues,
+        imageCheckSelection: selectionResult.data ?? null
+      }
+    )
+  }
+
   const result = await planMediaProcessing(page, config, {
     mediaAutomationMode: effectiveMode,
     mediaAutomationTools: [mediaTool],
     screenshotDir: options?.screenshotDir ?? "output/playwright"
   })
 
+  const finalStatus: StepStatus =
+    result.status === "failed"
+      ? "failed"
+      : result.status === "done"
+        ? "done"
+        : result.status
+
+  const finalDetail = effectiveMode === "unattended-apply"
+    ? requestedImageCheckIssues.length > 0
+      ? `Ran allowed Dianxiaomi media tool for image-check issue handling: ${mediaTool}`
+      : `Ran allowed Dianxiaomi media tool: ${mediaTool}`
+    : `Media repair stayed in plan-only mode for tool: ${mediaTool}`
+
   return repairApplyResult(
     action,
-    result.status,
-    effectiveMode === "unattended-apply"
-      ? `Ran allowed Dianxiaomi media tool: ${mediaTool}`
-      : `Media repair stayed in plan-only mode for tool: ${mediaTool}`,
+    finalStatus,
+    finalDetail,
     {
       mediaTool,
       mode: effectiveMode,
-      writerResult: result
+      writerResult: result,
+      imageCheckSelection: null
     }
   )
 }
@@ -2462,7 +11317,7 @@ const applyRepairAction = async (
   }
 
   if (writer === "run-media-tool") {
-    return applyRepairMediaTool(page, action, config, options)
+    return applyRepairMediaTool(page, action, draft, config, options)
   }
 
   return repairApplyResult(
@@ -2472,6 +11327,54 @@ const applyRepairAction = async (
       ? `Repair writer is not safe for browser execution: ${writer}`
       : "Repair action has no executable payload"
   )
+}
+
+const getRepairActionPriority = (action: DianxiaomiProductRepairAction) => {
+  const writer = action.payload?.writer
+  if (writer !== "run-media-tool") {
+    return 100
+  }
+
+  const mediaTool = action.payload?.mediaTool
+  if (mediaTool === "batchResize") {
+    return 0
+  }
+  if (mediaTool === "imageManagement") {
+    return 10
+  }
+  if (mediaTool === "imageTranslation") {
+    return 20
+  }
+  if (mediaTool === "whiteBackground" || mediaTool === "imageEditor") {
+    return 30
+  }
+
+  return 50
+}
+
+const shouldAbortRemainingRepairActions = (step: AutomationStepResult) => {
+  if (!step.id.startsWith("repair-apply-") || step.status !== "failed") {
+    return false
+  }
+
+  const stepData = step.data as Record<string, unknown> | undefined
+  const imageCheckSelection = stepData?.imageCheckSelection as Record<string, unknown> | undefined
+  const selection = imageCheckSelection?.selection as Record<string, unknown> | undefined
+  const categories = Array.isArray(selection?.categories)
+    ? selection.categories as Array<Record<string, unknown>>
+    : []
+  if (categories.some((category) => String(category.batchToolReason ?? "").includes("\u56fe\u7247\u7a7a\u95f4\u4e0d\u8db3"))) {
+    return true
+  }
+
+  const writerResult = stepData?.writerResult as Record<string, unknown> | undefined
+  const writerResultData = writerResult?.data as Record<string, unknown> | undefined
+  const tools = Array.isArray(writerResultData?.tools)
+    ? writerResultData.tools as Array<Record<string, unknown>>
+    : Array.isArray(writerResult?.tools)
+      ? writerResult.tools as Array<Record<string, unknown>>
+      : []
+  return tools.some((tool) => tool.failureKind === "storage-quota")
 }
 
 export const inspectRepairPlanPreview = async (
@@ -2553,7 +11456,9 @@ export const applyRepairPlan = async (
     return results
   }
 
-  const actionable = repairPlan.actions.filter((action) => action.payload)
+  const actionable = repairPlan.actions
+    .filter((action) => action.payload)
+    .sort((left, right) => getRepairActionPriority(left) - getRepairActionPriority(right))
   if (actionable.length === 0) {
     results.push(stepResult(
       "repair-apply-empty",
@@ -2563,14 +11468,36 @@ export const applyRepairPlan = async (
     ))
   }
 
-  for (const action of actionable) {
-    results.push(await applyRepairAction(page, action, draft, config, options))
+  for (let index = 0; index < actionable.length; index += 1) {
+    const action = actionable[index]!
+    const applied = await applyRepairAction(page, action, draft, config, options)
+    results.push(applied)
+    if (shouldAbortRemainingRepairActions(applied)) {
+      for (const remaining of actionable.slice(index + 1)) {
+        results.push(repairApplyResult(
+          remaining,
+          "skipped",
+          "Skipped because an earlier media repair hit Dianxiaomi image-space quota; continuing would waste billable image actions",
+          {
+            abortedBy: applied.id,
+            reasonCode: "storage-quota-short-circuit"
+          }
+        ))
+      }
+      break
+    }
   }
 
   const applied = results.filter((step) => step.id.startsWith("repair-apply-") && step.id !== "repair-apply-summary")
   const doneCount = applied.filter((step) => step.status === "done").length
   const failedCount = applied.filter((step) => step.status === "failed").length
   const skippedCount = applied.filter((step) => step.status === "skipped").length
+  const savedOrSubmitted = applied.some((step) => {
+    const stepData = step.data as Record<string, unknown> | undefined
+    const imageCheckSelection = stepData?.imageCheckSelection as Record<string, unknown> | undefined
+    const pageSave = imageCheckSelection?.pageSave as { status?: string } | undefined
+    return pageSave?.status === "done"
+  })
   results.push(stepResult(
     "repair-apply-summary",
     "Repair apply summary",
@@ -2585,7 +11512,7 @@ export const applyRepairPlan = async (
       doneCount,
       failedCount,
       skippedCount,
-      savedOrSubmitted: false
+      savedOrSubmitted
     }
   ))
 
@@ -2595,6 +11522,7 @@ export const applyRepairPlan = async (
 export const fillDraft = async (
   page: Page,
   taskDraft: ListingDraft,
+  productImages: string[] = [],
   config: DianxiaomiSelectorConfig = {},
   options?: RunnerOptions
 ) => {
@@ -2612,6 +11540,8 @@ export const fillDraft = async (
     return results
   }
 
+  results.push(await dismissStartupModalIfPresent(page))
+
   results.push(await fillSingleField(page, "title", taskDraft.listingTitle, config))
 
   if (taskDraft.description) {
@@ -2621,17 +11551,48 @@ export const fillDraft = async (
   }
 
   results.push(await fillAttributes(page, taskDraft, config))
+  results.push(await normalizeMaterialComposition(page))
+  results.push(await normalizeOriginProvince(page))
   results.push(await fillSkuPricing(page, taskDraft.skuPricing, config))
+  console.log("fill-draft stage: sku pricing completed")
+  if (productImages.length > 0) {
+    results.push(await fillSkuImageLinks(page, productImages))
+    console.log("fill-draft stage: sku image links completed")
+    results.push(await normalizeDescriptionImageModules(page, productImages))
+    console.log("fill-draft stage: description image modules normalized")
+  } else {
+    results.push(stepResult("fill-sku-image-links", "Fill SKU image links", "skipped", "Task has no product images"))
+    results.push(stepResult("normalize-description-image-modules", "Normalize description image modules", "skipped", "Task has no product images"))
+  }
+  results.push(await normalizeSizeChart(page))
+  console.log("fill-draft stage: size chart normalization completed")
   results.push(await inspectMediaProcessingSafety(page, config, options))
-  results.push(await planMediaProcessing(page, config, options))
-  if (results.some((step) => step.id === "media-processing-plan" && step.status === "failed")) {
+  console.log("fill-draft stage: media processing safety inspection completed")
+  if (options?.saveDraft) {
     results.push(stepResult(
-      "write-blocked-media-processing",
-      "Write blocked",
-      "failed",
-      "Save/submit was blocked because unattended Dianxiaomi media processing did not complete successfully"
+      "media-processing-plan",
+      "Media processing plan",
+      "skipped",
+      "Save-draft stage reuses the current media state and does not rerun billable Dianxiaomi media tools"
     ))
-    return results
+    console.log("fill-draft stage: media processing plan skipped during save-draft stage")
+  } else {
+    const mediaProcessingPlan = await planMediaProcessing(page, config, options)
+    results.push(mediaProcessingPlan)
+    console.log(`fill-draft stage: media processing plan completed (${mediaProcessingPlan.status})`)
+    if (
+      options?.mediaAutomationMode === "unattended-apply"
+      && mediaProcessingPlan.status === "failed"
+      && options.submit
+    ) {
+      results.push(stepResult(
+        "write-blocked-media-processing",
+        "Write blocked",
+        "failed",
+        "Submit was blocked because Dianxiaomi media processing did not complete in unattended mode",
+        mediaProcessingPlan.data
+      ))
+    }
   }
 
   return results
@@ -2723,7 +11684,10 @@ export const inspectPublishSurface = async (
   results.push(...await inspectMediaTools(page, config))
   results.push(await inspectMediaProcessingSafety(page, config, options))
   if (options?.mediaAutomationMode === "unattended-open" || options?.mediaAutomationMode === "unattended-apply") {
-    results.push(await planMediaProcessing(page, config, options))
+    results.push(await planMediaProcessing(page, config, {
+      ...options,
+      mediaAutomationMode: "plan-only"
+    }))
   }
 
   return results
@@ -2731,6 +11695,9 @@ export const inspectPublishSurface = async (
 
 export const saveOrSubmit = async (page: Page, options: RunnerOptions) => {
   const config = loadSelectorConfig(options.selectorConfig)
+  if (options.review) {
+    return stepResult("review-hold", "Review hold", "skipped", "Review mode stops before save/submit")
+  }
   const targetSurface = await inspectDianxiaomiTargetSurface(page, config)
 
   if (!targetSurfaceCanWrite(targetSurface)) {
@@ -2743,11 +11710,8 @@ export const saveOrSubmit = async (page: Page, options: RunnerOptions) => {
     )
   }
 
-  if (options.review) {
-    return stepResult("review-hold", "人工审核停靠", "skipped", "已进入审核停靠模式，未保存草稿或提交")
-  }
-
   if (options.submit) {
+    console.log("save-or-submit stage: entering submit listing flow")
     return submitListingWithVerification(page, config, options)
   }
 
@@ -2763,14 +11727,13 @@ export const saveOrSubmit = async (page: Page, options: RunnerOptions) => {
   }
 
   if (options.saveDraft) {
-    const clicked = await clickByKeywords(page, ["保存草稿", "保存", "暂存", "save draft", "save"], config.buttons?.save)
-    console.log(clicked ? "已点击保存草稿按钮" : "未找到保存草稿按钮，已停留在当前页面等待人工确认")
-    return stepResult(
-      "save-draft",
-      "保存草稿",
-      clicked ? "done" : "failed",
-      clicked ? "已点击保存草稿按钮" : "未找到保存草稿按钮，已停留在当前页面等待人工确认"
-    )
+    console.log("save-or-submit stage: entering save draft flow")
+    // P0-C: previously this branch only clicked save and reported done. That
+    // hid "button clicked but Dianxiaomi did not confirm" failures and let
+    // bad drafts advance into submit. Now we poll for a verified success
+    // feedback (success keyword in toast / alert / message) before reporting
+    // done.
+    return saveDraftWithVerification(page, config, 2)
   }
 
   return stepResult("save-draft", "保存草稿", "skipped", "已按参数跳过保存草稿")
