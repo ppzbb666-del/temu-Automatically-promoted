@@ -1,8 +1,93 @@
 # Current Status
 
-Updated: 2026-06-05
+Updated: 2026-06-10
 
 ## Completed In This Iteration
+
+- Dianxiaomi automation target-url safety is stricter now:
+  - `help.dianxiaomi.com` help-center URLs are rejected as automation targets
+  - plain Dianxiaomi home/workspace URLs are no longer treated as real product edit targets for auto-return
+  - login/profile reuse can still open the Dianxiaomi workspace, but the runner now waits for a real product edit page instead of bouncing into help pages
+- Dianxiaomi `图片检测` feedback now preserves categorized image issues when available:
+  - `image-management` instant-action failures can carry structured issue buckets such as `轮播图 尺寸` or `产品图 比例`
+  - snapshot enrichment merges those issue details back into the work item `snapshot.imageCheck.issues`
+  - requirement checks now surface concrete image-check issue summaries instead of only a generic "not confirmed"
+  - repair-plan generation can now split required image repairs by categorized image-check issue and map them to the nearest fixed tool path (`batchResize`, `imageTranslation`, `whiteBackground`, `imageManagement`)
+
+- Default unattended scope selection now supports both dimensions the operator actually needs:
+  - store scope
+  - product scope (`ready` queue / specified Dianxiaomi product links / source buckets)
+- Shared/server/dashboard now pass structured queue scope end to end:
+  - `itemUrls`
+  - `sourceBuckets`
+  - queue-run results persist the requested scope for later health/audit filtering
+- Added shared automation-scope helpers so store filtering and product filtering use one normalization path instead of separate ad hoc logic in server and dashboard.
+- Default dashboard entry now includes minimal scope controls only:
+  - choose store
+  - choose product scope mode
+  - paste Dianxiaomi product links when needed
+  - check source buckets (`collection-box`, `pending-publish`, `listing-draft`) when needed
+- Queue daemon health, unattended startup check, default queue-run, recovery, and manual-budget validation actions now all honor the selected product scope instead of only store scope.
+- Source-bucket capture is now structured, not only inferred from loose text:
+  - `DianxiaomiCollectedProduct.sourceBucket`
+  - `DianxiaomiProductWorkItem.sourceBucket`
+- Browser extension real-page admission now detects explicit Dianxiaomi source states:
+  - `collection-box`
+  - `pending-publish`
+  - `listing-draft`
+  and uploads `sourceBucket` with collected products/work items.
+- Added a real-page admission calibration runner: `npm run admission:calibrate --workspace @temu-ai-ops/automation -- --url="<real Dianxiaomi page>"`. It launches Chromium with the built unpacked extension, clicks the injected `加入队列` action on the live page, and verifies the server stored:
+  - collected product `sourceBucket`
+  - work item `sourceBucket`
+  - work item `pageProfile`
+  - page-linked real-page notes (`page profile key`, `source bucket`)
+- Real admission calibration was executed against `https://www.dianxiaomi.com/web/popTemu/edit?id=161406453047896278` with the live logged-in profile. The stored Dianxiaomi work item now updates in place with:
+  - `storeName: Source Dream shop`
+  - `pageProfile: 待发布编辑页`
+  - `sourceBucket: pending-publish`
+- Admission queueing on real Dianxiaomi pages now waits for the page to become stable before uploading:
+  - visible Dianxiaomi loading overlays must clear
+  - scan results must stabilize across multiple polls
+  - pricing pages (`pending-publish`, `listing-draft`, `product-edit`) must expose editable price fields before the extension will queue the item
+- Re-ran live admission calibration on the same real product after the readiness fix. The false `priceFieldCount = 0` / `needs-revision` path is gone; the live work item now returns to `ready-for-automation`.
+- Real-page SKU admission extraction is now aligned to the actual Dianxiaomi tables:
+  - primary SKU rows come from the `variationSku + price` table
+  - stock is joined back from the separate stock table by shared row prefix
+  - aggregate live snapshot on `2026-06-10` now reads `skuCount: 5`, `priceFieldCount: 5`, `stockFieldCount: 5` instead of the earlier noisy over-counts
+- Live admission sampling now excludes the injected extension panel, footer/copyright chrome, loading/spinner images, and other non-product artifacts. This removed the false positive `copyright` compliance block that the old body-wide sampler could create on real pages.
+- Source-bucket filtering now prefers explicit uploaded `sourceBucket`; raw page text and page-profile text remain only as fallback for older stored items.
+- Server regression coverage now includes scoped queue-run cases for:
+  - selected store + selected source bucket
+  - selected store + specified item URL
+- Verification completed:
+  - `npm run typecheck --workspace @temu-ai-ops/shared`
+  - `npm run typecheck --workspace @temu-ai-ops/server`
+  - `npm run typecheck --workspace @temu-ai-ops/dashboard`
+  - `npm run test --workspace @temu-ai-ops/server`
+  - `npm run build --workspace @temu-ai-ops/dashboard`
+  - `npm run build --workspace @temu-ai-ops/extension`
+
+- Real Dianxiaomi publish calibration is now verified on the live Temu edit page `https://www.dianxiaomi.com/web/popTemu/edit?id=161406453047896278`. The automation can fill the product, open the green `发布` dropdown, click `立即发布`, and read the real Dianxiaomi submit feedback instead of only clicking the outer button.
+- Real Dianxiaomi size-chart handling is verified on the same live page. The automation can open the existing size-chart modal, inspect metric values, reuse the saved template path when needed, confirm the modal, and continue to save/submit verification.
+- Real Dianxiaomi image-tool discovery now recognizes the live page structure instead of only fixture/demo selectors. The runtime can now detect:
+  - top-level `一键翻译`
+  - top-level `图片检测`
+  - image-module dropdown `批量改图片尺寸`
+  - image-module dropdown `批量编辑`
+  - image-module dropdown `图片翻译`
+- Unattended `batch-resize` now has a dedicated real-page path. On the live Dianxiaomi batch-resize modal it can:
+  - open the image-module dropdown
+  - choose `批量改图片尺寸`
+  - confirm `等比例调整`
+  - confirm `图片小边`
+  - fill `1785`
+  - ensure `选择全部`
+  - click `生成JPG图片`
+  - capture before/after screenshots and structured tool feedback
+- Real submit is now blocked safely when unattended media processing fails. Instead of crashing into the publish button with an open modal, the runner records `write-blocked-media-processing` and stops before `发布`.
+- Live calibration proved the current real blocker is not selector drift but Dianxiaomi account capacity: batch resize failed with `图片空间不足`. This is now classified as `media-processing` with `failureKind=storage-quota`, `retryable=false`, and a manual-budget repair action instead of an auto-retry path.
+- Server-side failure routing now distinguishes image-space quota from transient media failures. `storage-quota` creates a manual repair plan (`释放店小秘图片空间`) and pauses default unattended actions; transient media failures still stay in the retryable media bucket only when the report explicitly marks them transient.
+- Task generation for Dianxiaomi work items now preserves linkage metadata on `task.draft.attributes` again (`dianxiaomiWorkItemId`, `dianxiaomiPageUrl`, `dianxiaomiRequirementPreset`, `dianxiaomiCollectedProductId`), restoring downstream server test expectations and keeping runner-side linkage available from the draft payload.
 
 - Unattended startup now has a dedicated `dianxiaomi-session` gate. If the latest selector diagnosis, blocked work item, or queue audit shows `login-or-captcha`, unattended startup stays blocked until a newer real Dianxiaomi diagnosis proves the logged-in profile is healthy again.
 - Queue daemon health, alerts, and recommendation priority now surface session loss as a first-class blocker. `resolve-login-or-captcha` is raised before normal queue/resume guidance, so the default unattended path does not keep trying to run with an expired Dianxiaomi session.
@@ -29,6 +114,10 @@ Updated: 2026-06-05
 - Manual `小批量试跑` now releases safe `autoRetryRecommended=true` blocked Dianxiaomi work items before selecting ready items, and returns the released ids in the queue-run result. This makes the home-screen "可自动重试" recommendation executable without requiring the long-running daemon to be started first.
 - The daily home screen now detects core backend connection failures and promotes them to `服务未连接`. Start, calibration, and trial actions stay disabled until the server responds, and the startup metric changes from vague `检查中` to `离线`.
 - Full-flow completion now immediately resolves its source Dianxiaomi work item. Completed flows keep the item `edited`; failed flows mark it `blocked` with a structured failure diagnosis, so manual trial runs and daemon runs feed the same home-screen recovery recommendation.
+- Full-flow completion now also enriches the source Dianxiaomi work item snapshot from the finished automation reports before writing the final status:
+  - applied media-tool results from `media-processing-plan` are merged back into `snapshot.mediaToolSignals`
+  - successful `image-management` instant actions now set `snapshot.imageCheck.passed = true`
+  - requirements / suggested edits are rescored while preserving the flow-resolved `blocked` / `edited` status
 
 - Automation reports now start with a `target-surface` page identity gate. It records the current URL, title, host, whether the page is a real Dianxiaomi host, whether it is only the local dry-run fixture, whether login/CAPTCHA text is present, and counts for title/description/SKU/price/stock/save/submit/media/editable signals.
 - The local `data:` page used in smoke tests is now explicitly labeled as `fixture`; it is not treated as a real Dianxiaomi page in reports.
@@ -56,10 +145,10 @@ Updated: 2026-06-05
 - `unattended-apply` now verifies native media tool feedback after each internal apply. Per-tool reports include `feedbackState`, `feedbackMessage`, and `feedbackSource`; failure or unknown success feedback marks the tool `apply-failed`.
 - `unattended-apply` now verifies that the opened media surface matches the intended Dianxiaomi tool before clicking any internal apply/save control. Per-tool reports include `surfaceState`, `surfaceMatchedKeyword`, and `surfaceText`; missing or mismatched media surfaces mark the tool `apply-failed`, close the surface if possible, block later media tools, and prevent later save/submit.
 - Media tool execution now stops after the first native media processing failure. Later allowlisted tools are reported as `blocked-by-media-failure` and are not clicked.
-- Fill/save/submit runner paths now add `write-blocked-media-processing` and skip the later save/publish action if unattended media processing failed, so a bad image operation cannot continue into draft save or Dianxiaomi publish.
+- `plan-only` remains the default media mode for fill/save flows, but `unattended-apply` is now a hard gate. When Dianxiaomi media processing fails or opens the wrong tool surface, the runner records `write-blocked-media-processing` and stops before save-draft or submit-listing.
 - Smoke coverage now includes simulated Dianxiaomi dialogs for image translation, white background, image editor, batch resize, and image management. It verifies that `unattended-apply` can process all allowlisted tools in sequence, capture open/before/after screenshots for each tool, close each dialog, and return to the listing editor without touching publish/submit.
-- Smoke coverage now also simulates a failed batch resize feedback path. It verifies the failure reason is captured, later media tools are blocked, and the save-draft runner does not click save after media processing fails.
-- Smoke coverage now simulates a wrong media surface after clicking a tool entry. It verifies the mismatch is captured in the media plan, later media tools are blocked, and save-draft does not click save.
+- Smoke coverage now also simulates a failed batch resize feedback path. It verifies the failure reason is captured, later media tools are blocked, `write-blocked-media-processing` is emitted, and the save-draft runner does not click save after media processing fails.
+- Smoke coverage now simulates a wrong media surface after clicking a tool entry. It verifies the mismatch is captured in the media plan, later media tools are blocked, `write-blocked-media-processing` is emitted, and save-draft does not click save.
 - Server and dashboard now expose a `full-flow` automation launcher that chains dry-run, fill-draft, unattended media apply, and save-draft as one background job.
 - Full-flow can optionally append `submit-listing` after save-draft with `submitAfterSave=true`. This clicks the Dianxiaomi submit/publish control and moves the item toward the platform pricing review / 核价 stage.
 - Server and dashboard also expose a standalone `submit-listing` launcher. It is blocked until a matching same-target save-draft job has completed successfully.

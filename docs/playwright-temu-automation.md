@@ -37,8 +37,13 @@ npm run report --workspace @temu-ai-ops/automation
 指定店小秘具体页面：
 
 ```bash
-npm run run --workspace @temu-ai-ops/automation -- --url=https://www.dianxiaomi.com/
+npm run run --workspace @temu-ai-ops/automation -- --url="https://www.dianxiaomi.com/web/popTemu/edit?id=<real-item-id>"
 ```
+
+注意：
+
+- `--url` 必须是店小秘真实商品编辑页，不能填首页，也不能填 `help.dianxiaomi.com` 帮助页。
+- 如果这次启动只需要借用已登录 profile，也可以先打开店小秘主站登录，再手动进入真实商品编辑页；自动化现在不会再把帮助页当成目标页反复跳转。
 
 从任务 JSON 文件读取：
 
