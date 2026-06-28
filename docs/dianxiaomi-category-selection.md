@@ -79,6 +79,32 @@ node scripts/backfill-category-hint.mjs "<label>" <id1> <id2> ...
 - 期望结果：`categorySelectionOk=true` 且 `newStatus=ready-for-automation`。
 - 这是 **`高级区` / 一次性运维工具**，不是默认主流程的一环；用它说明品类信号本该在采集/录入阶段就带上。
 
+### 3b. 批量回写（探针驱动，page-already-selected 场景）
+
+存量里有一类商品：**店小秘页面上其实已经选好品类**，只是 work item 快照过时没记下品类信号，于是被 `category-selection` 卡在 `needs-revision`。
+这类回写最安全 —— 真跑时 `normalizeCategorySelection` 看到 `missingCategory=false` 会**直接 skip**，回写的 label 只用于过闸门 + 留痕，**不参与真跑的品类选择**（即使店小秘当初选错了类目，也是页面已选的事实，不是回写引入）。
+
+链路（全部一次性运维工具，产物落 `.runtime/`，已 gitignore）：
+
+```bash
+# 1. 导出 work item 快照
+curl -s "http://localhost:8787/dianxiaomi/product-work-items?limit=1000" -o .runtime/_wi_probe.json
+
+# 2. 只读探针：哪些页面已选品类（见 §2 probe-readonly-category-state.ts），输出落 .runtime/_probe_all.jsonl
+#    注意 Windows 命令行长度上限：URL 多时分批（~30 个/批）跑
+
+# 3. 从探针结果构建 id->label 计划（排除 fixture、清洗店小秘短名）
+node scripts/build-category-backfill-plan.mjs        # 写 .runtime/_backfill_plan.json
+
+# 4. 回写（默认 dry-run，看清每条；--apply 才真写）
+node scripts/backfill-category-plan.mjs              # dry-run
+node scripts/backfill-category-plan.mjs --apply      # 执行
+```
+
+- [scripts/build-category-backfill-plan.mjs](../scripts/build-category-backfill-plan.mjs)：解析探针文本里「`产品分类<短名>选择分类`」的店小秘短名，排除非真实编辑页（fixture），产出干净计划。
+- [scripts/backfill-category-plan.mjs](../scripts/backfill-category-plan.mjs)：按 id 各带各的 label 回写，**dry-run 默认**，`--apply` 才 POST。
+- 2026-06：首次批量执行救回 66 个（页面已选品类），`ready` 1 → 67。
+
 ## 4. 测试侧固化
 
 [apps/server/test/automation-runner.test.ts](../apps/server/test/automation-runner.test.ts) 里所有"完整/ready 列表"型 fixture
