@@ -50,6 +50,14 @@
 
 `dry-run ✅ → fill-draft ✅(含媒体)→ save-draft`(草稿多次真存进店小秘)。submit 被媒体门拦已突破,但 save-draft 现卡在「每色3图」(墙3)。
 
+## 墙 3 修复的 headless 验证(2026-06-30)
+
+`fetchProductImagesFromEditJson` 的核心假设(`edit.json` 暴露每色图 URL)已用只读探针 [probe-editjson-images.ts](../apps/automation/src/probe-editjson-images.ts) 在 4 个真实商品上验证 ✅:每色 6-7 图,去重后 10-15 张,远超「每色3图」下限,URL 是真实 pddpic/alicdn CDN。所以图片恢复对这批「页面引用型」商品确实能拿到图。
+
+**但这只证明「图能捞到」,不证明「save 能过」**——按既往真跑实锤,save 真正撞的是 variant-remap `rowsAfter=0`(「主题颜色至少需要选一个」),颜色变种行没物化。完整 fill→save 真跑是 operator-attended(headed 浏览器、~15-20 分钟/件、headed 窗口只在操作者屏幕),需操作者在场才能继续。
+
+> 同次发现并修复了一个**服务端启动崩溃**:`planner.ts` 的 `DIANXIAOMI_PLACEHOLDER_CATEGORY_LABELS` 在 TDZ 里(顶层 work-item readiness 重建早于该 const 声明),6-29 品类回填把 work item 写进持久态后触发,server 自此无法启动。已 hoist 修复(commit 7acf165)。
+
 ## 仍未做(非本次)
 
 - A2 `browser-profile` 门:启动 daemon 时传 `profile=.runtime/playwright/dianxiaomi-real-profile`(已登录、无 SingletonLock)。
