@@ -1622,6 +1622,18 @@ const taskStore = new Map<string, PublishTask>([
 let activeTaskId = persistedState?.activeTaskId ?? seededTasks[0]?.id ?? null
 const debugSnapshots: PageDebugSnapshot[] = []
 const dianxiaomiCollectedProducts: DianxiaomiCollectedProduct[] = (persistedState?.dianxiaomiCollectedProducts ?? []).slice(0, 50)
+// Declared here (ahead of the work-item readiness rebuild below) because
+// refreshDianxiaomiWorkItemReadiness runs during this top-level evaluation and
+// reaches isPlaceholderDianxiaomiCategory, which reads this Set. Leaving it at
+// its original position (further down the module) put it in the temporal dead
+// zone and crashed server startup once persisted work items existed.
+const DIANXIAOMI_PLACEHOLDER_CATEGORY_LABELS = new Set([
+  "dianxiaomi account scan",
+  "dianxiaomi collected",
+  "dianxiaomi product requiring edits",
+  "dianxiaomi product edit",
+  "dianxiaomi product"
+])
 const dianxiaomiProductWorkItems = new Map<string, DianxiaomiProductWorkItem>(
   (persistedState?.dianxiaomiProductWorkItems ?? []).map((item): [string, DianxiaomiProductWorkItem] => {
     const normalized = refreshDianxiaomiWorkItemReadiness(withDianxiaomiRepairActionGate(item))
@@ -1680,14 +1692,6 @@ const withoutDianxiaomiTaskMetaAttributes = (attributes: Record<string, string> 
 
 const getDianxiaomiCollectedProduct = (id: string | undefined) =>
   id ? dianxiaomiCollectedProducts.find((item) => item.id === id) ?? null : null
-
-const DIANXIAOMI_PLACEHOLDER_CATEGORY_LABELS = new Set([
-  "dianxiaomi account scan",
-  "dianxiaomi collected",
-  "dianxiaomi product requiring edits",
-  "dianxiaomi product edit",
-  "dianxiaomi product"
-])
 
 function normalizeCategoryLabel(value?: string | null) {
   return value?.trim() || undefined
