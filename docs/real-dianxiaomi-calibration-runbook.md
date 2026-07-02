@@ -143,30 +143,36 @@ curl -s http://localhost:8787/automation/unattended-startup-check | python -c "i
 
 ## Step 6: 小批量试跑
 
+默认首页 `小批量试跑` 的详细通过标准看 [docs/limit-3-trial-acceptance.md](limit-3-trial-acceptance.md)。这里仅保留启动方式和关键观察点。
+
 按 [docs/roadmap-to-production.md](roadmap-to-production.md) 下一步条目：
 
-```bash
-# 在 Dashboard 高级 → daily 试跑
-# limit=3, submitAfterSave=true, mediaAutomationMode=unattended-apply
-```
+```powershell
+# 在 Dashboard 首页动作区点击「小批量试跑」
+# 或直接调 API，默认日间试跑参数如下：
+$body = @{
+  limit = 3
+  submitAfterSave = $true
+  mediaAutomationMode = "unattended-apply"
+  mediaAutomationTools = @("image-translation", "batch-resize")
+} | ConvertTo-Json
 
-或通过 API：
-```bash
-curl -X POST http://localhost:8787/automation/queue-run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "limit": 3,
-    "submitAfterSave": true,
-    "mediaAutomationMode": "unattended-apply",
-    "mediaAutomationTools": ["image-translation", "white-background", "image-editor", "batch-resize"]
-  }'
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:8787/automation/queue-run" `
+  -ContentType "application/json" `
+  -Body $body
 ```
 
 观察：
+- `/automation/unattended-startup-check` —— 启动门是否还有硬阻塞
+- `/automation/queue-runs` —— 最近一次 `limit=3` 试跑的 `queued/skipped/flowJobIds`
+- `/automation/full-flow/jobs` —— 每个 flow job 的最终状态
 - `/automation/queue-daemon/health` —— 队列健康
-- `/automation/manual-budget/trials` —— 试跑结果
 - 失败的话看 `failureDiagnosis` 分类
 - 成功的话：商品进入 Dianxiaomi 草稿状态
+
+注意：`/automation/manual-budget/trials` 属于 Advanced bounded trial / validation，不是首页默认 `limit=3` 试跑记录。
 
 ## 后续
 

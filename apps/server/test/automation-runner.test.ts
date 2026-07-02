@@ -23,9 +23,11 @@ const {
   classifyDianxiaomiWorkFailure,
   collectDianxiaomiSnapshotEnrichmentFromReports,
   getAutomationModeReadiness,
+  getAutomationJobTimeoutMs,
   getDianxiaomiQueueDaemonHealth,
   getDianxiaomiQueueDaemonState,
   getDianxiaomiUnattendedStartupCheck,
+  getFullFlowJobTimeoutMs,
   getProfileLockArchiveReadiness,
   listManualBudgetProofRecords,
   listManualBudgetTrials,
@@ -59,6 +61,7 @@ const {
   updateDianxiaomiProductWorkItemStatus,
   exportTaskFile,
   listTaskFileExports,
+  validateSelectorConfig,
   validateDianxiaomiAutomationPageUrl
 } = await import("../src/planner")
 
@@ -169,7 +172,10 @@ const writeRealSelectorDiagnosis = (fileName: string, pageUrl: string, pageTitle
         surfaceStatus: "real-dianxiaomi",
         isDianxiaomiHost: true,
         isDataFixture: false,
-        canInspect: true
+        canInspect: true,
+        fieldReadiness: {
+          stock: 1
+        }
       }
     },
     summary: {
@@ -280,6 +286,12 @@ for (const testCase of cases) {
   }
 }
 
+assert.equal(getAutomationJobTimeoutMs("dry-run"), 10 * 60 * 1000, "dry-run timeout should stay bounded")
+assert.equal(getAutomationJobTimeoutMs("fill-draft"), 20 * 60 * 1000, "fill-draft timeout should cover unattended media processing")
+assert.equal(getAutomationJobTimeoutMs("save-draft"), 15 * 60 * 1000, "save-draft timeout should exceed default job timeout")
+assert.equal(getAutomationJobTimeoutMs("submit-listing"), 20 * 60 * 1000, "submit-listing timeout should allow post-save publish waits")
+assert.equal(getFullFlowJobTimeoutMs(), 60 * 60 * 1000, "full-flow timeout should exceed the sum of long-running stage budgets")
+
 mkdirSync(testDir, {
   recursive: true
 })
@@ -317,7 +329,8 @@ writeFileSync(publishSuccessReportPath, JSON.stringify({
         verified: true
       }
     }
-  ]
+]
+
 }, null, 2), "utf8")
 const publishSuccessOutcome = buildDianxiaomiPublishOutcomeForFullFlow({
   id: "flow-publish-success",
@@ -998,6 +1011,108 @@ assert(
   incompleteSelectorReadiness.selectorBlockers?.some((issue) => issue.id === "button-save-missing"),
   "missing save selector should be exposed as a selector blocker"
 )
+
+const previousStockViaSkuRowsDiagnosisDirs = process.env.SELECTOR_DIAGNOSIS_DIRS
+try {
+  const stockViaSkuRowsDiagnosisDir = path.join(testDir, "stock-via-sku-rows-diagnoses")
+  mkdirSync(stockViaSkuRowsDiagnosisDir, { recursive: true })
+  process.env.SELECTOR_DIAGNOSIS_DIRS = stockViaSkuRowsDiagnosisDir
+  writeFileSync(path.join(stockViaSkuRowsDiagnosisDir, "dianxiaomi-diagnosis-unit-stock-via-sku-rows.json"), JSON.stringify({
+    pageUrl: target.url,
+    pageTitle: "Stock via SKU rows real Dianxiaomi calibration",
+    createdAt: new Date(Date.now() + 2_000).toISOString(),
+    requiredOk: true,
+    targetSurface: {
+      id: "target-surface",
+      label: "Target surface",
+      status: "done",
+      detail: "real Dianxiaomi listing edit page",
+      data: {
+        surfaceStatus: "real-dianxiaomi",
+        isDianxiaomiHost: true,
+        isDataFixture: false,
+        canInspect: true,
+        fieldReadiness: {
+          stock: 1
+        }
+      }
+    },
+    summary: {
+      fieldCount: 4,
+      buttonCount: 2,
+      skuRowCount: 1,
+      mediaToolCount: 0
+    },
+    fields: {
+      title: {
+        ok: true,
+        candidates: [{ selectorHint: "input[name='title']", score: 10, text: "title" }]
+      },
+      description: {
+        ok: true,
+        candidates: [{ selectorHint: "textarea[name='description']", score: 10, text: "description" }]
+      },
+      price: {
+        ok: true,
+        candidates: [{ selectorHint: "input[name='price']", score: 10, text: "price" }]
+      },
+      stock: {
+        ok: false,
+        candidates: []
+      },
+      attribute: {
+        ok: true,
+        candidates: [{ selectorHint: "[data-attribute-editor]", score: 10, text: "attribute" }]
+      }
+    },
+    buttons: {
+      save: {
+        ok: true,
+        candidates: [{ selectorHint: "button.save", score: 10, text: "save" }]
+      },
+      submit: {
+        ok: true,
+        candidates: [{ selectorHint: "button.submit", score: 10, text: "submit" }]
+      }
+    },
+    mediaTools: {},
+    mediaToolActions: {
+      apply: {},
+      close: {}
+    },
+    skuRows: {
+      ok: true,
+      count: 1,
+      samples: []
+    }
+  }, null, 2), "utf8")
+  writeFileSync(incompleteSelectorTarget.selectorConfig, JSON.stringify({
+    fields: {
+      title: ["input[name='title']"],
+      description: ["textarea[name='description']"],
+      price: ["input[name='price']"],
+      stock: [],
+      attribute: ["[data-attribute-editor]"]
+    },
+    buttons: {
+      save: ["button.save"],
+      submit: ["button.submit"]
+    },
+    skuRows: ["tr, [role='row'], [class*='sku' i], [class*='table-row' i], [class*='row' i]"]
+  }, null, 2), "utf8")
+  const stockViaSkuRowsValidation = validateSelectorConfig(incompleteSelectorTarget.selectorConfig)
+  assert.equal(stockViaSkuRowsValidation.valid, true, "stock selector should not block when the latest diagnosis proves SKU rows are writable")
+  assert(
+    stockViaSkuRowsValidation.issues.some((issue) =>
+      issue.id === "field-stock-preserved"
+      && issue.level === "warning"
+      && /SKU rows/i.test(issue.message)
+    ),
+    "stock via SKU rows should be downgraded to a preserved warning"
+  )
+} finally {
+  process.env.SELECTOR_DIAGNOSIS_DIRS = previousStockViaSkuRowsDiagnosisDirs
+}
 
 const staleProfileLockPath = path.join(testDir, "stale-profile-lock")
 mkdirSync(staleProfileLockPath, { recursive: true })

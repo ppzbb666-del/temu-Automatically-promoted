@@ -68,13 +68,23 @@ Updated: 2026-06-22
 - **验收**:`ready work items` 检查 = pass(至少 1 个 `ready-for-automation`)
 
 ### A4 — limit=3 试跑(我驱动,你看结果)
-```bash
-curl -X POST http://localhost:8787/automation/queue-run \
-  -H "Content-Type: application/json" \
-  -d '{"limit":3,"submitAfterSave":true,"mediaAutomationMode":"unattended-apply",
-       "mediaAutomationTools":["image-translation","white-background","image-editor","batch-resize"]}'
+详见 [limit-3-trial-acceptance.md](limit-3-trial-acceptance.md)。最小 API 例子：
+
+```powershell
+$body = @{
+  limit = 3
+  submitAfterSave = $true
+  mediaAutomationMode = "unattended-apply"
+  mediaAutomationTools = @("image-translation", "batch-resize")
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:8787/automation/queue-run" `
+  -ContentType "application/json" `
+  -Body $body
 ```
-- 观察 `/automation/queue-daemon/health`、`/automation/manual-budget/trials`、失败看 `failureDiagnosis`
+- 观察 `/automation/queue-runs`、`/automation/full-flow/jobs`、`/automation/queue-daemon/health`，失败看 `failureDiagnosis`
 - **验收**:3 个全部 full-flow 成功 → 进店小秘草稿 + 已点提交核价 → **「开始无人值守」解锁**
 
 ### A5 — 首次无人值守批跑(你点)

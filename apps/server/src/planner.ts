@@ -4018,7 +4018,7 @@ const summarizeSelectorConfig = (config: DianxiaomiSelectorConfig | null) => ({
 // "preserved" warning rather than a hard error. Blocking a restore over an
 // empty `fields.description` would force operators to keep a stub selector
 // just to satisfy the safety gate.
-const BLOCKING_CRITICAL_SELECTOR_FIELDS = ["title", "price", "stock"]
+const BLOCKING_CRITICAL_SELECTOR_FIELDS = ["title", "price"]
 const BLOCKING_CRITICAL_SELECTOR_BUTTONS = ["save"]
 
 const criticalSelectorEntry = (entry: SelectorConfigDiffEntry) =>
@@ -4402,15 +4402,28 @@ export const validateSelectorConfig = (selectorConfigPath?: string): SelectorCon
       // broken configs are still blocked.
       const diagnosisField = latestDiagnosis?.fields?.[field]
       const diagnosisFieldCandidates = diagnosisField?.candidates ?? []
+      const diagnosisFieldReadiness = ((latestDiagnosis?.targetSurface?.data as Record<string, unknown> | undefined)?.fieldReadiness
+        ?? {}) as Record<string, unknown>
       const descriptionRecognizedAsPreview = field === "description"
         && Boolean(latestDiagnosis)
         && diagnosisField?.ok === true
         && diagnosisFieldCandidates.length === 0
+      const stockRecognizedViaSkuRows = field === "stock"
+        && Boolean(latestDiagnosis)
+        && Number(diagnosisFieldReadiness.stock ?? 0) > 0
+        && diagnosisFieldCandidates.length === 0
+        && latestDiagnosis?.skuRows?.ok === true
       if (descriptionRecognizedAsPreview) {
         issues.push({
           id: `field-${field}-preserved`,
           level: "warning",
           message: `field selector missing but the latest diagnosis recognized ${field} as a module/image preview; the field will be preserved`
+        })
+      } else if (stockRecognizedViaSkuRows) {
+        issues.push({
+          id: `field-${field}-preserved`,
+          level: "warning",
+          message: `field selector missing but the latest diagnosis recognized ${field} via SKU rows; the field will be filled from per-row inputs`
         })
       } else {
         issues.push({

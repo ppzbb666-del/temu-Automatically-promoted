@@ -22,6 +22,18 @@ const timestampId = () => new Date().toISOString().replace(/[:.]/g, "-");
 const DEFAULT_SCREENSHOT_DIR = "output/playwright";
 const DEFAULT_ARTIFACT_ROOT = ".runtime/automation-artifacts";
 const DEFAULT_UNATTENDED_MEDIA_AUTOMATION_TOOLS = ["image-translation", "batch-resize"];
+const DEFAULT_AUTOMATION_JOB_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_FULL_FLOW_JOB_TIMEOUT_MS = 60 * 60 * 1000;
+const AUTOMATION_JOB_TIMEOUT_MS_BY_MODE = {
+    "dry-run": DEFAULT_AUTOMATION_JOB_TIMEOUT_MS,
+    "repair-preview": DEFAULT_AUTOMATION_JOB_TIMEOUT_MS,
+    "repair-apply": 15 * 60 * 1000,
+    "fill-draft": 20 * 60 * 1000,
+    "save-draft": 15 * 60 * 1000,
+    "submit-listing": 20 * 60 * 1000
+};
+export const getAutomationJobTimeoutMs = (mode) => AUTOMATION_JOB_TIMEOUT_MS_BY_MODE[mode] ?? DEFAULT_AUTOMATION_JOB_TIMEOUT_MS;
+export const getFullFlowJobTimeoutMs = () => DEFAULT_FULL_FLOW_JOB_TIMEOUT_MS;
 const getQueueDaemonStatePath = () => process.env.QUEUE_DAEMON_STATE_PATH ?? path.join(getRepoRoot(), ".runtime/data/queue-daemon-state.json");
 const getRecoveryRunHistoryPath = () => process.env.RECOVERY_RUN_HISTORY_PATH ?? path.join(getRepoRoot(), ".runtime/data/recovery-runs.json");
 const getManualBudgetProofLedgerPath = () => process.env.MANUAL_BUDGET_PROOF_LEDGER_PATH ?? path.join(getRepoRoot(), ".runtime/data/manual-budget-proof-ledger.json");
@@ -1798,7 +1810,7 @@ const listAutomationJobs = (mode, limit = 20) => Array.from(getJobStore(mode).va
     .slice(0, limit);
 const getAutomationJob = (mode, id) => getJobStore(mode).get(id) ?? null;
 const latestAutomationJob = (mode) => listAutomationJobs(mode, 1)[0] ?? null;
-const waitForAutomationJob = async (mode, id, timeoutMs = 10 * 60 * 1000) => {
+const waitForAutomationJob = async (mode, id, timeoutMs = getAutomationJobTimeoutMs(mode)) => {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
         const job = getAutomationJob(mode, id);
@@ -1812,7 +1824,7 @@ const waitForAutomationJob = async (mode, id, timeoutMs = 10 * 60 * 1000) => {
     }
     throw new Error(`${mode} job timed out: ${id}`);
 };
-const waitForFullFlowJob = async (id, timeoutMs = 20 * 60 * 1000) => {
+const waitForFullFlowJob = async (id, timeoutMs = getFullFlowJobTimeoutMs()) => {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
         const job = fullFlowJobs.get(id);
@@ -4819,7 +4831,7 @@ const runFullFlowStage = async (flowId, mode, input) => {
     updateFullFlowStage(flowId, mode, {
         jobId: started.id
     });
-    const job = await waitForAutomationJob(mode, started.id);
+    const job = await waitForAutomationJob(mode, started.id, getAutomationJobTimeoutMs(mode));
     updateFullFlowStage(flowId, mode, {
         status: job.status,
         finishedAt: job.finishedAt,
