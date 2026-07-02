@@ -44,6 +44,7 @@ type ProbedProductImage = {
   height: number
   loaded: boolean
   aspectRatio: number | null
+  loadState: "loaded" | "error" | "timeout"
 }
 
 type SkuImageCellState = {
@@ -56,6 +57,8 @@ type SkuImageCellState = {
     aspectRatio: number | null
   }>
 }
+
+const PRODUCT_IMAGE_PROBE_TIMEOUT_MS = 10_000
 
 type SkuImageCellTarget = {
   cell: Locator
@@ -4237,30 +4240,32 @@ const isWritableField = async (field: Locator | null) => {
 
 export const findSkuRows = async (page: Page, config?: DianxiaomiSelectorConfig) => {
   const variantInfoContainer = await findVariantInfoContainer(page)
-  const rowRoot = variantInfoContainer ?? page
-  const configuredRow = config?.skuRows?.length
-    ? rowRoot.locator(config.skuRows.join(", ")).filter({
-        has: rowRoot.locator(SKU_ROW_FIELD_SELECTOR)
-      })
-    : null
-  const rowCandidates = rowRoot.locator("tr, [role='row'], [class*='sku' i], [class*='table-row' i]").filter({
-    has: rowRoot.locator(SKU_ROW_FIELD_SELECTOR)
-  })
-
   const rows: Array<{ row: Locator; text: string }> = []
-  const candidates = configuredRow && await configuredRow.count() > 0 ? configuredRow : rowCandidates
   const seen = new Set<string>()
-  const count = Math.min(await candidates.count(), 80)
-  for (let index = 0; index < count; index += 1) {
-    const row = candidates.nth(index)
-    if (!await row.isVisible().catch(() => false)) {
-      continue
-    }
+  const collectRowsFromRoot = async (rowRoot: Page | Locator) => {
+    const configuredRow = config?.skuRows?.length
+      ? rowRoot.locator(config.skuRows.join(", ")).filter({
+          has: rowRoot.locator(SKU_ROW_FIELD_SELECTOR)
+        })
+      : null
+    const rowCandidates = rowRoot.locator("tr, [role='row'], [class*='sku' i], [class*='table-row' i]").filter({
+      has: rowRoot.locator(SKU_ROW_FIELD_SELECTOR)
+    })
+    const candidates = configuredRow && await configuredRow.count() > 0 ? configuredRow : rowCandidates
+    const count = Math.min(await candidates.count().catch(() => 0), 80)
 
-    const text = normalizeText(await row.innerText().catch(() => ""))
-    const inputs = await countVisible(row.locator(SKU_ROW_FIELD_SELECTOR), 12)
+    for (let index = 0; index < count; index += 1) {
+      const row = candidates.nth(index)
+      if (!await row.isVisible().catch(() => false)) {
+        continue
+      }
 
-    if (inputs > 0) {
+      const text = normalizeText(await row.innerText().catch(() => ""))
+      const inputs = await countVisible(row.locator(SKU_ROW_FIELD_SELECTOR), 12)
+      if (inputs <= 0) {
+        continue
+      }
+
       const key = await locatorIdentityKey(row)
       if (key && seen.has(key)) {
         continue
@@ -4274,6 +4279,14 @@ export const findSkuRows = async (page: Page, config?: DianxiaomiSelectorConfig)
         text
       })
     }
+  }
+
+  if (variantInfoContainer) {
+    await collectRowsFromRoot(variantInfoContainer)
+  }
+
+  if (rows.length === 0) {
+    await collectRowsFromRoot(page)
   }
 
   return rows
@@ -6882,7 +6895,71 @@ const skuIdentifierCode = (sku: ListingSkuPricing, index: number, usedCodes: Set
   return code
 }
 
+// P0-F: Temu rejects apparel listings whose SKUs under one SKC (color) carry
+// different prices ("服装类目skc下价格需要保持一致"). Source data can carry an
+// outlier price on one size (e.g. a scraped 999 on 黑色/S while every other size
+// is 13.32). Group SKUs by their color attribute and coerce each group to a
+// single price: the modal (most common) value, breaking ties toward the lowest
+// so an outlier can never inflate the group. SKUs with no detectable color are
+// left untouched (each is its own SKC).
+const skuColorKey = (sku: ListingSkuPricing): string | null => {
+  for (const [key, value] of Object.entries(sku.attributes)) {
+    const normalizedKey = key.replace(/\s+/g, "").toLowerCase()
+    if (ATTRIBUTE_ALIASES.color.some((alias) => normalizedKey.includes(alias.toLowerCase()))) {
+      const text = value.trim()
+      if (text) {
+        return text
+      }
+    }
+  }
+  return null
+}
+
+export const normalizeSkcPricing = (skus: ListingSkuPricing[]): ListingSkuPricing[] => {
+  const groups = new Map<string, number[]>()
+  for (const sku of skus) {
+    const color = skuColorKey(sku)
+    if (!color) {
+      continue
+    }
+    const prices = groups.get(color) ?? []
+    prices.push(sku.salePriceUsd)
+    groups.set(color, prices)
+  }
+
+  const groupPrice = new Map<string, number>()
+  for (const [color, prices] of groups) {
+    const counts = new Map<number, number>()
+    for (const price of prices) {
+      counts.set(price, (counts.get(price) ?? 0) + 1)
+    }
+    let bestPrice = prices[0]!
+    let bestCount = -1
+    for (const [price, count] of counts) {
+      // Most common wins; ties break toward the lower price (never inflate).
+      if (count > bestCount || (count === bestCount && price < bestPrice)) {
+        bestPrice = price
+        bestCount = count
+      }
+    }
+    groupPrice.set(color, bestPrice)
+  }
+
+  return skus.map((sku) => {
+    const color = skuColorKey(sku)
+    if (!color) {
+      return sku
+    }
+    const unified = groupPrice.get(color)
+    if (unified === undefined || unified === sku.salePriceUsd) {
+      return sku
+    }
+    return { ...sku, salePriceUsd: unified }
+  })
+}
+
 export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], config?: DianxiaomiSelectorConfig) => {
+  skus = normalizeSkcPricing(skus)
   const rows = await findSkuRows(page, config)
   const usedRows = new Set<number>()
   let filledPrices = 0
@@ -7582,29 +7659,58 @@ const probeProductImages = async (page: Page, imageUrls: string[]): Promise<Prob
     return []
   }
 
-  const probed = await page.evaluate(async (urls) =>
-    Promise.all(urls.map((url) =>
+  const probed = await page.evaluate(async (payload) => {
+    const urls = payload.urls
+    const timeoutMs = payload.timeoutMs
+    return Promise.all(urls.map((url) =>
       new Promise<ProbedProductImage>((resolve) => {
         const img = new Image()
+        let settled = false
+        const cleanupAndResolve = (loadState: "loaded" | "error" | "timeout") => {
+          if (settled) {
+            return
+          }
+          settled = true
+          window.clearTimeout(timer)
+          img.onload = null
+          img.onerror = null
+          if (loadState === "loaded") {
+            resolve({
+              url,
+              width: img.naturalWidth || 0,
+              height: img.naturalHeight || 0,
+              loaded: true,
+              aspectRatio: img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : null,
+              loadState
+            })
+            return
+          }
+          resolve({
+            url,
+            width: 0,
+            height: 0,
+            loaded: false,
+            aspectRatio: null,
+            loadState
+          })
+        }
+        const timer = window.setTimeout(() => {
+          cleanupAndResolve("timeout")
+        }, timeoutMs)
         img.referrerPolicy = "no-referrer"
-        img.onload = () => resolve({
-          url,
-          width: img.naturalWidth || 0,
-          height: img.naturalHeight || 0,
-          loaded: true,
-          aspectRatio: img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : null
-        })
-        img.onerror = () => resolve({
-          url,
-          width: 0,
-          height: 0,
-          loaded: false,
-          aspectRatio: null
-        })
+        img.onload = () => {
+          cleanupAndResolve("loaded")
+        }
+        img.onerror = () => {
+          cleanupAndResolve("error")
+        }
         img.src = url
       })
-    )),
-  uniqueUrls)
+    ))
+  }, {
+    urls: uniqueUrls,
+    timeoutMs: PRODUCT_IMAGE_PROBE_TIMEOUT_MS
+  })
 
   return probed
 }
