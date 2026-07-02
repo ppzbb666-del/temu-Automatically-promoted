@@ -290,8 +290,27 @@ const runDianxiaomiFlow = async (context: BrowserContext, options: RunnerOptions
       )
       if (!writeBlocked) {
         if (options.submit && options.skipDraftFill) {
-          steps.push(await fillSkuImageLinks(page, task.product.images))
-          steps.push(await normalizeDescriptionImageModules(page, task.product.images))
+          if (task.product.images.length > 0) {
+            steps.push(await fillSkuImageLinks(page, task.product.images))
+            steps.push(await normalizeDescriptionImageModules(page, task.product.images))
+          } else {
+            // Page-reference work items carry no task images; the SKU images
+            // were already recovered from edit.json and verified during the
+            // fill/save stages. Re-running the strict replacement with an
+            // empty list can only fail and poison the submit-stage report.
+            steps.push({
+              id: "fill-sku-image-links",
+              label: "Fill SKU image links",
+              status: "skipped",
+              detail: "Task carries no product images; keeping the SKU images already applied during fill/save stages"
+            })
+            steps.push({
+              id: "normalize-description-image-modules",
+              label: "Normalize description image modules",
+              status: "skipped",
+              detail: "Task carries no product images"
+            })
+          }
         }
         if (
           options.submit

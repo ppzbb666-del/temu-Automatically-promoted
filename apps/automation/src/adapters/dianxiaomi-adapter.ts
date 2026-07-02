@@ -6958,12 +6958,23 @@ export const normalizeSkcPricing = (skus: ListingSkuPricing[]): ListingSkuPricin
   })
 }
 
+// P0-F2: page-reference Dianxiaomi work items carry synthesized placeholder
+// SKUs ("Dianxiaomi SKU"/"Dianxiaomi SKU N", attributes = internal task
+// metadata only, salePriceUsd = the planner's DIANXIAOMI_DEFAULT_DECLARED_PRICE
+// sentinel of 999). Writing that fabricated price onto a real listing lands on
+// the first SKU row and breaks Temu's "服装类目skc下价格需要保持一致" rule —
+// the page's own per-variation prices are authoritative for these items.
+const isPlaceholderDianxiaomiSkuPricing = (sku: ListingSkuPricing): boolean =>
+  sku.skuName.trim().startsWith("Dianxiaomi SKU")
+  && Object.keys(sku.attributes).every((key) => isInternalDianxiaomiAttributeKey(key))
+
 export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], config?: DianxiaomiSelectorConfig) => {
   skus = normalizeSkcPricing(skus)
   const rows = await findSkuRows(page, config)
   const usedRows = new Set<number>()
   let filledPrices = 0
   let filledStocks = 0
+  let skippedPlaceholderPrices = 0
   let fallbackPriceStatus: StepStatus | null = null
   let fallbackStockStatus: StepStatus | null = null
   // P0-E: track the first SKU price field we successfully wrote so we can
@@ -7002,11 +7013,15 @@ export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], conf
     const stockField = await getRowField(selectedRow.row, "stock", 1)
 
     if (priceField) {
-      await fillTextField(priceField, sku.salePriceUsd.toFixed(2))
-      filledPrices += 1
-      if (!firstPriceField) {
-        firstPriceField = priceField
-        firstPriceExpected = sku.salePriceUsd.toFixed(2)
+      if (isPlaceholderDianxiaomiSkuPricing(sku)) {
+        skippedPlaceholderPrices += 1
+      } else {
+        await fillTextField(priceField, sku.salePriceUsd.toFixed(2))
+        filledPrices += 1
+        if (!firstPriceField) {
+          firstPriceField = priceField
+          firstPriceExpected = sku.salePriceUsd.toFixed(2)
+        }
       }
     }
 
@@ -7016,7 +7031,7 @@ export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], conf
     }
   }
 
-  if (filledPrices === 0 && skus[0]) {
+  if (filledPrices === 0 && skus[0] && !isPlaceholderDianxiaomiSkuPricing(skus[0])) {
     const fallback = await findField(page, "price", config)
     if (fallback) {
       await fillTextField(fallback, skus[0].salePriceUsd.toFixed(2))
@@ -7052,17 +7067,23 @@ export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], conf
     firstPriceVerified = firstPriceActual === firstPriceExpected
   }
 
-  console.log(`SKU 填写完成：价格 ${filledPrices} 项，库存 ${filledStocks} 项`)
+  const placeholderNote = skippedPlaceholderPrices > 0
+    ? `（占位 SKU 跳过写价 ${skippedPlaceholderPrices} 项，保留页面现有申报价）`
+    : ""
+  console.log(`SKU 填写完成：价格 ${filledPrices} 项，库存 ${filledStocks} 项${placeholderNote}`)
   return stepResult(
     "fill-sku-pricing",
     "填写 SKU 价格和库存",
-    filledPrices > 0 || filledStocks > 0 ? "done" : "failed",
-    `SKU 填写完成：价格 ${filledPrices} 项，库存 ${filledStocks} 项`,
+    filledPrices > 0 || filledStocks > 0
+      ? "done"
+      : skippedPlaceholderPrices > 0 ? "skipped" : "failed",
+    `SKU 填写完成：价格 ${filledPrices} 项，库存 ${filledStocks} 项${placeholderNote}`,
     {
       skuCount: skus.length,
       detectedRows: rows.length,
       filledPrices,
       filledStocks,
+      skippedPlaceholderPrices,
       ...skuIdentifierSummary,
       fallbackPriceStatus,
       fallbackStockStatus,
@@ -7070,6 +7091,199 @@ export const fillSkuPricing = async (page: Page, skus: ListingSkuPricing[], conf
       firstPriceExpected,
       firstPriceActual: firstPriceActual.slice(0, 40)
     }
+  )
+}
+
+// P0-F2: Temu rejects apparel listings whose SKUs under one SKC (color) carry
+// different declared prices ("服装类目skc下价格需要保持一致"). Historical fill
+// runs stamped the planner's 999 placeholder onto the first SKU row of
+// page-reference listings, so the SAVED page itself is inconsistent even after
+// the placeholder write is stopped. This step reads the saved per-variation
+// prices from edit.json, computes each color group's target price (mode, ties
+// toward the lowest so an outlier can never inflate the group), and rewrites
+// outlier rows on the page so the next save persists a consistent price set.
+export type SkcVariationPricing = {
+  color: string | null
+  size: string | null
+  supplierPriceCents: number | null
+}
+
+export const computeSkcPriceRepairs = (variations: SkcVariationPricing[]) => {
+  const groups = new Map<string, number[]>()
+  for (const variation of variations) {
+    if (!variation.color || variation.supplierPriceCents === null) {
+      continue
+    }
+    const prices = groups.get(variation.color) ?? []
+    prices.push(variation.supplierPriceCents)
+    groups.set(variation.color, prices)
+  }
+
+  const targets = new Map<string, number>()
+  for (const [color, prices] of groups) {
+    const counts = new Map<number, number>()
+    for (const price of prices) {
+      counts.set(price, (counts.get(price) ?? 0) + 1)
+    }
+    let bestPrice = prices[0]!
+    let bestCount = -1
+    for (const [price, count] of counts) {
+      if (count > bestCount || (count === bestCount && price < bestPrice)) {
+        bestPrice = price
+        bestCount = count
+      }
+    }
+    targets.set(color, bestPrice)
+  }
+
+  return variations
+    .filter((variation) =>
+      variation.color
+      && variation.supplierPriceCents !== null
+      && targets.get(variation.color) !== variation.supplierPriceCents
+    )
+    .map((variation) => ({
+      color: variation.color!,
+      size: variation.size,
+      fromCents: variation.supplierPriceCents!,
+      toCents: targets.get(variation.color!)!
+    }))
+}
+
+const fetchDianxiaomiVariationPricingFromEditJson = async (page: Page): Promise<SkcVariationPricing[]> => {
+  const productId = (() => {
+    try {
+      return toNonEmptyText(new URL(page.url()).searchParams.get("id"))
+    } catch {
+      return null
+    }
+  })()
+  if (!productId) {
+    return []
+  }
+
+  try {
+    const response = await page.context().request.get(
+      `https://www.dianxiaomi.com/api/popTemuProduct/edit.json?id=${productId}`
+    )
+    if (!response.ok()) {
+      return []
+    }
+    const payload = await response.json().catch(() => null) as {
+      data?: { product?: { variations?: Array<Record<string, unknown>> } }
+    } | null
+    const variations = payload?.data?.product?.variations
+    if (!Array.isArray(variations)) {
+      return []
+    }
+
+    return variations.map((variation) => {
+      const attrMap = variation?.attrMap && typeof variation.attrMap === "object"
+        ? variation.attrMap as Record<string, unknown>
+        : {}
+      let color: string | null = null
+      let size: string | null = null
+      for (const [key, value] of Object.entries(attrMap)) {
+        const text = typeof value === "string" ? value.trim() : ""
+        if (!text) {
+          continue
+        }
+        const normalizedKey = key.replace(/\s+/g, "").toLowerCase()
+        if (!color && ATTRIBUTE_ALIASES.color.some((alias) => normalizedKey.includes(alias.toLowerCase()))) {
+          color = text
+        } else if (!size && ATTRIBUTE_ALIASES.size.some((alias) => normalizedKey.includes(alias.toLowerCase()))) {
+          size = text
+        }
+      }
+      const rawPrice = Number(variation?.supplierPrice)
+      return {
+        color,
+        size,
+        supplierPriceCents: Number.isFinite(rawPrice) && rawPrice > 0 ? Math.round(rawPrice) : null
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+export const normalizeSkcPagePricing = async (page: Page, config?: DianxiaomiSelectorConfig) => {
+  const variations = await fetchDianxiaomiVariationPricingFromEditJson(page)
+  if (variations.length === 0) {
+    return stepResult(
+      "normalize-skc-pricing",
+      "Normalize SKC pricing",
+      "skipped",
+      "No variation pricing is available from edit.json on this page; existing prices left untouched"
+    )
+  }
+
+  const repairs = computeSkcPriceRepairs(variations)
+  if (repairs.length === 0) {
+    return stepResult(
+      "normalize-skc-pricing",
+      "Normalize SKC pricing",
+      "skipped",
+      `SKC prices are already consistent across ${variations.length} variation(s)`,
+      { variationCount: variations.length }
+    )
+  }
+
+  const rows = await findSkuRows(page, config)
+  const usedRowIndexes = new Set<number>()
+  const repairResults: Array<Record<string, unknown>> = []
+  let repaired = 0
+
+  for (const repair of repairs) {
+    const targetValue = (repair.toCents / 100).toFixed(2)
+    const sizePattern = repair.size
+      ? new RegExp(`(^|[\\s/-])${escapeRegExp(repair.size)}($|[\\s/-])`, "i")
+      : null
+    let outcome: Record<string, unknown> = { ...repair, fixed: false, reason: "no matching SKU row with the outlier price" }
+
+    for (const [index, row] of rows.entries()) {
+      if (usedRowIndexes.has(index)) {
+        continue
+      }
+      if (!row.text.includes(repair.color)) {
+        continue
+      }
+      if (sizePattern && !sizePattern.test(row.text)) {
+        continue
+      }
+      const priceField = await getRowField(row.row, "price", 0)
+      if (!priceField) {
+        continue
+      }
+      const currentValue = (await readFieldValue(priceField).catch(() => "")).trim()
+      const currentCents = Math.round(Number.parseFloat(currentValue) * 100)
+      if (!Number.isFinite(currentCents) || currentCents !== repair.fromCents) {
+        continue
+      }
+      await fillTextField(priceField, targetValue)
+      const verifiedValue = (await readFieldValue(priceField).catch(() => "")).trim()
+      const verified = verifiedValue === targetValue
+      usedRowIndexes.add(index)
+      if (verified) {
+        repaired += 1
+      }
+      outcome = { ...repair, fixed: verified, previousValue: currentValue, writtenValue: verifiedValue }
+      break
+    }
+
+    repairResults.push(outcome)
+  }
+
+  const allRepaired = repaired === repairs.length
+  console.log(`normalize-skc-pricing: repaired ${repaired}/${repairs.length} SKC price outlier(s)`)
+  return stepResult(
+    "normalize-skc-pricing",
+    "Normalize SKC pricing",
+    allRepaired ? "done" : "failed",
+    allRepaired
+      ? `Rewrote ${repaired} SKC price outlier(s) so every color group carries one declared price`
+      : `Only ${repaired}/${repairs.length} SKC price outlier(s) could be repaired on the page`,
+    { variationCount: variations.length, repairs: repairResults }
   )
 }
 
@@ -11260,8 +11474,38 @@ const runSubmitAttempt = async (
   config: DianxiaomiSelectorConfig,
   attempt: number
 ): Promise<SubmitAttemptResult> => {
+  // The 运营公告 notice modal (and any leftover success dialog) overlays a
+  // freshly loaded edit page and intercepts pointer events — the submit click
+  // then times out ("locator resolved ... attempting click action"). Clear
+  // blocking dialogs before reading feedback and clicking, mirroring the
+  // save-draft attempt path.
+  await dismissStartupModalIfPresent(page)
+  await dismissSaveSuccessModalIfPresent(page)
+  const dialogsBeforeClick = await getPageSafetyState(page)
+  if (dialogsBeforeClick.visibleDialogCount > 0) {
+    await closeMediaSurfaceStackToBaseline(page, 0, config)
+    await dismissSaveSuccessModalIfPresent(page)
+  }
+
   const previousFeedback = await readSubmitFeedback(page)
-  const submitClick = await clickDianxiaomiSubmitAction(page, config)
+  // Observed live: the 发布 click can throw a Playwright timeout when a
+  // confirm/result dialog (vcDialogTitle5) opens mid-click and intercepts the
+  // retry — yet the submission still went out (dxmOfflineState flipped to
+  // publishing). Don't crash the stage on that timeout; fall through to the
+  // confirm click + feedback read, and let the edit.json publish verdict
+  // decide the truth.
+  let submitClick: Awaited<ReturnType<typeof clickDianxiaomiSubmitAction>>
+  try {
+    submitClick = await clickDianxiaomiSubmitAction(page, config)
+  } catch (error) {
+    console.warn(`submit click threw (treating as ambiguous, verifying via feedback/edit.json): ${error instanceof Error ? error.message.split("\n")[0] : String(error)}`)
+    submitClick = {
+      clickedButton: true,
+      clickedMenuAction: false,
+      menuActionText: null,
+      menuVisibleAfterButton: false
+    }
+  }
 
   if (!submitClick.clickedButton) {
     return {
@@ -11292,6 +11536,137 @@ const runSubmitAttempt = async (
   }
 }
 
+// P0-F3: the Dianxiaomi acceptance dialog after a submission reads「产品已提交
+// 发布，请在「发布中」、「发布失败」或「在线产品」中查看！」— it enumerates tab
+// NAMES, so the failure-keyword matcher misreads it as a failure, and trusting
+// it as success is equally wrong (the store accepting a submission says nothing
+// about Temu's publish verdict; see the publishFail-with-toast incident). Treat
+// it as "submission accepted", then read the REAL verdict from edit.json
+// (dxmOfflineState / errMsg).
+const SUBMIT_ACCEPTED_TOAST_PATTERN = /已提交发布/
+const PUBLISH_FAIL_STATE = "publishFail"
+const PUBLISH_STATE_POLL_INTERVAL_MS = 5_000
+const PUBLISH_STATE_POLL_TIMEOUT_MS = 90_000
+
+type DianxiaomiPublishStateSnapshot = {
+  available: boolean
+  dxmState: string | null
+  dxmOfflineState: string | null
+  errMsg: string | null
+}
+
+const readDianxiaomiPublishState = async (page: Page): Promise<DianxiaomiPublishStateSnapshot> => {
+  const unavailable: DianxiaomiPublishStateSnapshot = {
+    available: false,
+    dxmState: null,
+    dxmOfflineState: null,
+    errMsg: null
+  }
+  let productId: string | null = null
+  try {
+    productId = toNonEmptyText(new URL(page.url()).searchParams.get("id"))
+  } catch {
+    return unavailable
+  }
+  if (!productId) {
+    return unavailable
+  }
+
+  try {
+    const response = await page.context().request.get(
+      `https://www.dianxiaomi.com/api/popTemuProduct/edit.json?id=${productId}`
+    )
+    if (!response.ok()) {
+      return unavailable
+    }
+    const payload = await response.json().catch(() => null) as {
+      data?: { product?: Record<string, unknown> }
+    } | null
+    const product = payload?.data?.product
+    if (!product || typeof product !== "object") {
+      return unavailable
+    }
+    return {
+      available: true,
+      dxmState: toNonEmptyText(product.dxmState),
+      dxmOfflineState: toNonEmptyText(product.dxmOfflineState),
+      errMsg: toNonEmptyText(product.errMsg)
+    }
+  } catch {
+    return unavailable
+  }
+}
+
+type DianxiaomiPublishOutcome = {
+  verdict: "publish-fail" | "no-fail-detected" | "unverifiable"
+  baseline: DianxiaomiPublishStateSnapshot
+  final: DianxiaomiPublishStateSnapshot
+  observedChange: boolean
+  polls: number
+}
+
+const waitForDianxiaomiPublishOutcome = async (
+  page: Page,
+  baseline: DianxiaomiPublishStateSnapshot,
+  timeoutMs = PUBLISH_STATE_POLL_TIMEOUT_MS
+): Promise<DianxiaomiPublishOutcome> => {
+  const startedAt = Date.now()
+  let final: DianxiaomiPublishStateSnapshot = {
+    available: false,
+    dxmState: null,
+    dxmOfflineState: null,
+    errMsg: null
+  }
+  let observedChange = false
+  let polls = 0
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const current = await readDianxiaomiPublishState(page)
+    polls += 1
+    if (current.available) {
+      if (
+        baseline.available
+        && (
+          current.dxmOfflineState !== baseline.dxmOfflineState
+          || current.errMsg !== baseline.errMsg
+          || current.dxmState !== baseline.dxmState
+        )
+      ) {
+        observedChange = true
+      }
+      final = current
+      // Fresh failure = publishFail that differs from the pre-submit baseline,
+      // OR one we watched the state transition into (observed live:
+      // publishFail → publishing → publishFail with an identical errMsg).
+      const freshFailure = current.dxmOfflineState === PUBLISH_FAIL_STATE
+        && (
+          observedChange
+          || !baseline.available
+          || baseline.dxmOfflineState !== PUBLISH_FAIL_STATE
+          || current.errMsg !== baseline.errMsg
+        )
+      if (freshFailure || current.dxmState === "online") {
+        break
+      }
+    }
+    await page.waitForTimeout(PUBLISH_STATE_POLL_INTERVAL_MS)
+  }
+
+  if (!final.available) {
+    return { verdict: "unverifiable", baseline, final, observedChange, polls }
+  }
+  return {
+    // Conservative: any publishFail at the end of the window is a failure,
+    // even when it matches a stale baseline — a false "blocked" beats a false
+    // success that leaves the item sitting silently in the 发布失败 tab.
+    verdict: final.dxmOfflineState === PUBLISH_FAIL_STATE ? "publish-fail" : "no-fail-detected",
+    baseline,
+    final,
+    observedChange,
+    polls
+  }
+}
+
 const submitListingWithVerification = async (
   page: Page,
   config: DianxiaomiSelectorConfig,
@@ -11299,24 +11674,56 @@ const submitListingWithVerification = async (
 ) => {
   const attempts: SubmitAttemptResult[] = []
   const maxAttempts = Math.max(1, Math.min(10, options.submitMaxAttempts))
+  const baselinePublishState = await readDianxiaomiPublishState(page)
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const result = await runSubmitAttempt(page, config, attempt)
     attempts.push(result)
     console.log(`submit-listing attempt ${attempt}/${maxAttempts}: ${result.state} ${result.message}`)
 
-    if (result.state === "success" && result.feedbackChanged) {
+    const submissionAccepted = (result.state === "success" && result.feedbackChanged)
+      || SUBMIT_ACCEPTED_TOAST_PATTERN.test(result.message ?? "")
+
+    if (submissionAccepted) {
       const dismissal = await dismissSaveSuccessModalIfPresent(page)
+      const publishOutcome = await waitForDianxiaomiPublishOutcome(page, baselinePublishState)
+      console.log(`submit-listing publish verdict: ${publishOutcome.verdict} (state=${publishOutcome.final.dxmOfflineState ?? publishOutcome.final.dxmState ?? "unknown"})`)
+
+      if (publishOutcome.verdict === "publish-fail") {
+        return stepResult(
+          "submit-listing",
+          "Submit listing",
+          "failed",
+          `Dianxiaomi accepted the submission but Temu publish failed: ${publishOutcome.final.errMsg ?? PUBLISH_FAIL_STATE}`,
+          {
+            attempts,
+            maxAttempts,
+            success: false,
+            verified: true,
+            submissionAccepted: true,
+            publishOutcome,
+            dismissedSuccessModal: dismissal.dismissed,
+            matchedSuccessModal: dismissal.matched,
+            successModalText: dismissal.dialogText || null
+          }
+        )
+      }
+
+      const publishStateNote = publishOutcome.verdict === "no-fail-detected"
+        ? `publish state: ${publishOutcome.final.dxmOfflineState ?? publishOutcome.final.dxmState ?? "unknown"}`
+        : "publish state could not be verified via edit.json"
       return stepResult(
         "submit-listing",
         "Submit listing",
         "done",
-        `Dianxiaomi submit succeeded: ${result.message || "success"}`,
+        `Dianxiaomi submit succeeded: ${result.message || "success"} (${publishStateNote})`,
         {
           attempts,
           maxAttempts,
           success: true,
-          verified: true,
+          verified: publishOutcome.verdict === "no-fail-detected",
+          submissionAccepted: true,
+          publishOutcome,
           dismissedSuccessModal: dismissal.dismissed,
           matchedSuccessModal: dismissal.matched,
           successModalText: dismissal.dialogText || null
@@ -14615,6 +15022,8 @@ export const fillDraft = async (
   results.push(await normalizeOriginProvince(page))
   results.push(await fillSkuPricing(page, taskDraft.skuPricing, config))
   console.log("fill-draft stage: sku pricing completed")
+  results.push(await normalizeSkcPagePricing(page, config))
+  console.log("fill-draft stage: SKC price consistency normalized")
   // Legacy "page reference" work items carry no product images, so fillSkuImageLinks
   // would skip and save-draft fails the "每色3图" gate. Recover the listing's own
   // images from edit.json on the spot when none were passed in.
