@@ -4,13 +4,13 @@ Updated: 2026-07-04
 
 ## 当前卡点（先看这里）
 
-**写链路天花板已在单品上打通（2026-07-03 晚，真实页面实锤）**：商品 `id=161406453047896424`（~7 SKU）经 `queue-run`（`submitAfterSave=true`）跑完 `dry-run → fill-draft（含 image-translation + batch-resize）→ save-draft（「产品编辑成功」）→ submit-listing（「产品已提交发布」，publish state: publishing）`。证据：`.runtime/automation-artifacts/automation-full-flow-2026-07-03T19-49-49-946Z/`。三道墙在该商品上全部未触发：
+**limit=3 试跑门已通过（2026-07-03 深夜）**：queue-run `automation-queue-run-2026-07-03T22-09-12-853Z`（`limit=3`，`itemUrls` 圈定，queued=1、skipped=0）关联的 full-flow job 全部 `completed`，submit-listing 返回「产品已提交发布」。试跑门（`getDailyTrialGate`）判定通过，「开始无人值守」解锁。注意：本次 queued=1（只圈了 1 个商品），满足门的形式条件；批量稳定性尚未用 3 个不同商品验证过。
 
-1. **墙 4 主题颜色/变种行** —— 该商品 `normalize-skc-pricing` skipped（本就一致），save 未被拒。**注意**：大 SKU 商品（322 SKU 的 `161406453261437092`）在 fill 阶段 variant-remap 时 OOM 崩溃，未验证；墙 4 对复杂商品是否真解仍未知。
-2. **墙 3 每色 3 图** —— `fetchProductImagesFromEditJson` 图片恢复真实生效，`fill-sku-image-links` done，save 未被「每色3图」拒。
-3. **墙 2 image-editor 第二层** —— 仍未真修，默认媒体工具白名单维持 `image-translation` + `batch-resize`（不含 image-editor），该配置下媒体门通过。
+**当前状态：8 项无人值守启动检查全 pass、`canStart=true`**（需带正确 profile 路径）。此前 dashboard 默认 profile 指向不存在的 `.runtime/dianxiaomi-real-profile` 导致 browser-profile 门误报 block，已修（2026-07-04，commit `a574a2a`）：默认改为真实登录目录 `.runtime/playwright/dianxiaomi-profile`。
 
-**下一步就是唯一里程碑**：limit=3 真实试跑全绿 → 解锁「开始无人值守」（[sprint-plan-to-usable.md](sprint-plan-to-usable.md)）。已知约束：本机内存紧（~2GB 空闲），优先挑小 SKU 商品；server 别用 `tsx watch` 跑（热重载会杀 full-flow 子进程）。
+**下一步（冲刺 A5，最后一步）**：控制台首页点「开始无人值守」跑真实 ready 队列，商品稳定流到「Temu 核价确认」即为「能用起来」。已知约束不变：本机内存紧（~2GB 空闲），优先小 SKU 商品（当前队列里 ready 的 `161406453261437092` 是 322 SKU OOM 炸弹，需先补小 SKU 商品或把它降级）；server 别用 `tsx watch` 跑；守护进程默认 `limit=1` 每轮、间隔可配。
+
+早前实锤（2026-07-03 晚）：商品 `161406453047896424`（~7 SKU）全链 `dry-run → fill-draft（含媒体）→ save-draft（「产品编辑成功」）→ submit-listing（「产品已提交发布」）`。三道墙在该商品上均未触发；墙 4 对大 SKU 商品仍未验证、墙 2 image-editor 第二层未真修（白名单继续排除）。
 
 代码健康快照（2026-07-04 实测）：全 workspace typecheck ✅、server+shared+extension 测试 ✅；`automation-runner.ts` 6077 行（已抽 6 个子模块）、`planner.ts` 4694 行、`dianxiaomi-adapter.ts` 15371 行、`App.tsx` 4466 行；存储已是 `node:sqlite`；已 `git init`（本地、无 remote）。
 
