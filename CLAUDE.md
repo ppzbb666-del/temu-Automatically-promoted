@@ -106,6 +106,7 @@ job 日志通用格式：`/jobs/:id/logs`。
 | 同步门 | [docs/sync-preflight-gate.md](docs/sync-preflight-gate.md) |
 | 选择器快照诊断 | [docs/dianxiaomi-snapshot-diagnosis.md](docs/dianxiaomi-snapshot-diagnosis.md) |
 | 编辑队列 | [docs/dianxiaomi-edit-queue.md](docs/dianxiaomi-edit-queue.md) |
+| 换新电脑上手 / stash 甄别 | [docs/new-machine-onboarding.md](docs/new-machine-onboarding.md) |
 
 ## 8. 工作约定
 
