@@ -194,7 +194,7 @@
 
 下一步（按优先级）：
 
-1. **墙 4：主题颜色 / 变种行适配** —— 当前 save-draft 的最后一道已知硬墙（「主题颜色至少需要选一个」、variant-remap `rowsAfter=0`）。只读探针 [probe-theme-color-structure.ts](../apps/automation/src/probe-theme-color-structure.ts) 已就位，适配代码未写。详见 [blocking-walls-diagnosis.md](blocking-walls-diagnosis.md) 墙 4。
+1. **墙 4：主题颜色 / 变种行适配** —— 当前 save-draft 的最后一道已知硬墙（「主题颜色至少需要选一个」、variant-remap `rowsAfter=0`）。只读探针 [probe-theme-color-structure.ts](../apps/automation/src/probes/probe-theme-color-structure.ts) 已就位，适配代码未写。详见 [blocking-walls-diagnosis.md](blocking-walls-diagnosis.md) 墙 4。
 2. **墙 3 真实验证**：`fetchProductImagesFromEditJson` 图片恢复已写好、headless 探针证明图能捞到，但完整 fill→save 过「每色 3 图」门需要 operator-attended 真跑（headed 浏览器 + 登录态）。
 3. **墙 2 收尾**：image-editor「批量编辑」第二层 bug（点确定弹窗不推进）真修；期间默认媒体工具白名单维持 `["image-translation", "batch-resize"]`（不含 image-editor）。
 4. **limit=3 真实试跑全绿 → 解锁「开始无人值守」** —— 唯一里程碑，见 [sprint-plan-to-usable.md](sprint-plan-to-usable.md)。

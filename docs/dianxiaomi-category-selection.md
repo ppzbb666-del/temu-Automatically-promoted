@@ -28,7 +28,7 @@ hasCategorySelectionSignal =
 
 ### `probe-readonly-category-state.ts`
 
-[apps/automation/src/probe-readonly-category-state.ts](../apps/automation/src/probe-readonly-category-state.ts)
+[apps/automation/src/probes/probe-readonly-category-state.ts](../apps/automation/src/probes/probe-readonly-category-state.ts)
 
 回答："**这些真实编辑页到底有没有已选品类？**" —— 纯读，不点击、不写。
 读的是 adapter 同款 `未选择分类` 信号，外加品类按钮可见性 + 品类标签附近文本。

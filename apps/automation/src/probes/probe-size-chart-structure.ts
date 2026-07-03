@@ -5,9 +5,9 @@
 // Usage: tsx src/probe-size-chart-structure.ts [--url=...]
 import path from "node:path"
 import { chromium, type Locator } from "playwright"
-import { getArgValue, waitForManualLoginIfNeeded } from "./common"
-import { inspectDianxiaomiTargetSurface, waitForPublishPage } from "./adapters/dianxiaomi-adapter"
-import { loadSelectorConfig } from "./selector-config"
+import { getArgValue, waitForManualLoginIfNeeded } from "../common"
+import { inspectDianxiaomiTargetSurface, waitForPublishPage } from "../adapters/dianxiaomi-adapter"
+import { loadSelectorConfig } from "../selector-config"
 
 const DEFAULT_URL = "https://www.dianxiaomi.com/web/popTemu/edit?id=161406453257944306"
 const clean = (v: string | null | undefined) => (v ?? "").replace(/\s+/g, " ").trim()

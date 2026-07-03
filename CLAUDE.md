@@ -140,9 +140,9 @@ job 日志通用格式：`/jobs/:id/logs`。
 
 ## 10. Git 现状
 
-- **本地这份拷贝没有 `.git`** —— 不是 git 仓库，无版本控制、无 diff、无回滚安全网。改动只落在磁盘上。
-- **大改动前先手动备份**（`cp foo.ts foo.ts.bak`），否则改坏没有 `git` 兜底。曾因此丢过 `automation-runner.ts` 源文件。
-- 上游仓库（供参考，本地未关联）：`origin` → `https://github.com/ppzbb666-del/Auto_goods.git`，首提交 `4de04c5 chore: import existing monorepo as baseline`。
+- **本地已 `git init`（2026-07-04）**，分支 `main`，基线提交为当日工作树快照（typecheck + 测试全绿状态）。改动有版本控制兜底了，但**没有远程**——只防误改，不防磁盘丢失。
+- 大改动照常可以先 `git stash` 或提交；`.backups/` 目录（gitignored）存历史 `.bak` 快照。
+- 上游仓库（供参考，本地未关联 remote）：`https://github.com/ppzbb666-del/Auto_goods.git`，其首提交 `4de04c5 chore: import existing monorepo as baseline`。**注意本地 git 历史与上游无共同祖先**，不要直接 push。
 - 没有 CI / 没有 pre-commit hook。
 
 ---

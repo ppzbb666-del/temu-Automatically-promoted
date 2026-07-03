@@ -586,7 +586,7 @@ Next, continue hardening the unattended publish success/failure loop: add route-
 
 - **根因**：上一轮（`4e79568`）新加的 `required` 校验 `category-selection`（`planner.ts` 的 `hasCategorySelectionSignal`）会把"无品类信号（label / categoryId / fullCid 全空）"的 work item 卡在 `needs-revision`，进不了无人值守。不是 bug，是有意硬门 —— 缺品类硬跑会在店小秘"未选择分类"那步失败。卡的是**存量 work item 没带品类信号**。
 - **诊断脚本（只读）**：
-  - [probe-readonly-category-state.ts](../apps/automation/src/probe-readonly-category-state.ts)：纯读真实编辑页，确认到底有没有已选品类（`missingCategory` / 按钮可见性 / 附近文本），不点击不写。
+  - [probe-readonly-category-state.ts](../apps/automation/src/probes/probe-readonly-category-state.ts)：纯读真实编辑页，确认到底有没有已选品类（`missingCategory` / 按钮可见性 / 附近文本），不点击不写。
   - [verify-category-label-only.ts](../apps/automation/src/verify-category-label-only.ts)：半只读，验证"只给 label（无 categoryId/fullCid）时 `normalizeCategorySelection` 能否自己选中品类"，会开弹窗选品类但不填字段/不保存/不提交。
 - **回写脚本**：[scripts/backfill-category-hint.mjs](../scripts/backfill-category-hint.mjs) 走既有 `POST /dianxiaomi/product-work-items` 给存量 work item 批量补 `categoryHint.label`（`source=manual`），server 原地更新并重算 requirements + status，期望 `categorySelectionOk=true` / `newStatus=ready-for-automation`。属 `高级区` 一次性运维工具。
 - **测试固化**：[automation-runner.test.ts](../apps/server/test/automation-runner.test.ts) 所有"完整/ready"型 fixture 显式补 `categoryHint: { label: "Home & Garden" }`，否则被新必填校验拉回 `needs-revision`，破坏 publish/recovery 路由断言。
@@ -599,5 +599,5 @@ Next, continue hardening the unattended publish success/failure loop: add route-
 
 - **墙 2 媒体工具（部分解）**：image-editor「批量编辑」弹窗第一层 bug（没选图就点确定 → 店小秘报「请选择要编辑的图片」，已选中 0）已修——apply 前调 `ensureCheckboxNearText(mediaSurface, "选择全部", true)`（[dianxiaomi-adapter.ts](../apps/automation/src/adapters/dianxiaomi-adapter.ts) `applyUnattendedMediaTools` 内，仅 `tool.id === "image-editor"` 路径）。第二层「点确定弹窗不推进」未真修，临时方案仍是把 image-editor 移出 `mediaAutomationTools` 白名单放行 submit。
 - **墙 3 图片缺失（已写修复，未真实验证）**：234/238 个「页面引用型」work item 完全没有图片 URL → fill 阶段 `fillSkuImageLinks` skip → save-draft 被「服装类颜色属性必须上传3张图片」拒。修复：新增 `fetchProductImagesFromEditJson(page)` 从店小秘 `edit.json`（`mainProductSkuSpecReqsList[].previewImgUrls`，`|` 分隔按色变体；`materialImgUrl`/`mainImage`/`extraImages` 兜底）即时把现有图捞回，`fillDraft` 在 `productImages` 为空时调用它，恢复后正常走 `fillSkuImageLinks` + `normalizeDescriptionImageModules`。`npm run typecheck --workspace @temu-ai-ops/automation` 通过。**尚未在真实页面跑过 fill→save 验证能否过「每色3图」门**。
-- **墙 4 主题颜色（新发现，仅探针）**：save 还会被「主题颜色至少需要选一个」拒。只读探针 [probe-theme-color-structure.ts](../apps/automation/src/probe-theme-color-structure.ts) 已就位（dump 主题颜色提及 + `.skuAttrItem_1001` SKC 勾选态 + color-table 行），**适配代码未写**，下轮处理。
-- **辅助探针**：[probe-category-detection-compare.ts](../apps/automation/src/probe-category-detection-compare.ts) 对比 `textContent` vs `innerText` 两种「未选择分类」判定差异（只读）。
+- **墙 4 主题颜色（新发现，仅探针）**：save 还会被「主题颜色至少需要选一个」拒。只读探针 [probe-theme-color-structure.ts](../apps/automation/src/probes/probe-theme-color-structure.ts) 已就位（dump 主题颜色提及 + `.skuAttrItem_1001` SKC 勾选态 + color-table 行），**适配代码未写**，下轮处理。
+- **辅助探针**：[probe-category-detection-compare.ts](../apps/automation/src/probes/probe-category-detection-compare.ts) 对比 `textContent` vs `innerText` 两种「未选择分类」判定差异（只读）。

@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises"
 import path from "node:path"
 import { chromium, type Locator, type Page } from "playwright"
-import { ensureDirectory, getArgValue, parseBoolean } from "./common"
+import { ensureDirectory, getArgValue, parseBoolean } from "../common"
 
 const DEFAULT_URL = "https://www.dianxiaomi.com/web/popTemu/edit?id=161406453261437092"
 const DEFAULT_PROFILE = ".runtime/dianxiaomi-real-profile"

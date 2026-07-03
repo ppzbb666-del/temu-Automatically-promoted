@@ -4,9 +4,9 @@
 // Usage: tsx src/probe-target-surface-readiness.ts [--url=...] [--headed=true]
 import path from "node:path"
 import { chromium } from "playwright"
-import { getArgValue, parseBoolean, waitForManualLoginIfNeeded } from "./common"
-import { inspectDianxiaomiTargetSurface } from "./adapters/dianxiaomi-adapter"
-import { loadSelectorConfig } from "./selector-config"
+import { getArgValue, parseBoolean, waitForManualLoginIfNeeded } from "../common"
+import { inspectDianxiaomiTargetSurface } from "../adapters/dianxiaomi-adapter"
+import { loadSelectorConfig } from "../selector-config"
 
 const DEFAULT_URL = "https://www.dianxiaomi.com/web/popTemu/edit?id=161406453261437376"
 

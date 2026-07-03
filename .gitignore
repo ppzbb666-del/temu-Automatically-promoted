@@ -16,5 +16,7 @@ output
 待发布编辑页/
 
 # 本地源码备份(含 .claude/plans 里约定的 *.bak 备份纪律),不入库
+# 备份统一放 .backups/(带日期前缀),不要散落在 src 里
 *.bak
 *.corrupt-backup
+.backups/

@@ -1,14 +1,14 @@
 import { writeFileSync } from "node:fs"
 import path from "node:path"
 import { chromium, type Locator, type Page } from "playwright"
-import { ensureDirectory, getArgValue, parseBoolean, waitForManualLoginIfNeeded } from "./common"
+import { ensureDirectory, getArgValue, parseBoolean, waitForManualLoginIfNeeded } from "../common"
 import {
   inspectDianxiaomiTargetSurface,
   normalizeVariantRemap,
   waitForPublishPage,
   waitForVariantRemapSurface
-} from "./adapters/dianxiaomi-adapter"
-import { loadSelectorConfig } from "./selector-config"
+} from "../adapters/dianxiaomi-adapter"
+import { loadSelectorConfig } from "../selector-config"
 
 type VariantRowSummary = {
   rowIndex: number

@@ -1,9 +1,9 @@
 import { writeFileSync } from "node:fs"
 import path from "node:path"
 import { chromium, type Locator, type Page } from "playwright"
-import { ensureDirectory, getArgValue, parseBoolean, waitForManualLoginIfNeeded } from "./common"
-import { inspectDianxiaomiTargetSurface, waitForPublishPage } from "./adapters/dianxiaomi-adapter"
-import { loadSelectorConfig } from "./selector-config"
+import { ensureDirectory, getArgValue, parseBoolean, waitForManualLoginIfNeeded } from "../common"
+import { inspectDianxiaomiTargetSurface, waitForPublishPage } from "../adapters/dianxiaomi-adapter"
+import { loadSelectorConfig } from "../selector-config"
 
 const TARGET_URL = "https://www.dianxiaomi.com/web/popTemu/edit?id=161406453261437092"
 const FIELD_LABEL = "承诺发货时效"

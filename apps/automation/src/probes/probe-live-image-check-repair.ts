@@ -1,9 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { chromium, type Locator, type Page } from "playwright"
-import { waitForManualLoginIfNeeded, type RunnerOptions } from "./common"
-import { applyRepairPlan, waitForPublishPage } from "./adapters/dianxiaomi-adapter"
-import { loadSelectorConfig } from "./selector-config"
+import { waitForManualLoginIfNeeded, type RunnerOptions } from "../common"
+import { applyRepairPlan, waitForPublishPage } from "../adapters/dianxiaomi-adapter"
+import { loadSelectorConfig } from "../selector-config"
 
 const PRODUCT_ID = "161406453261437092"
 const TARGET_URL = `https://www.dianxiaomi.com/web/popTemu/edit?id=${PRODUCT_ID}`

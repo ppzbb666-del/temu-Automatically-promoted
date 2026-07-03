@@ -2,12 +2,12 @@ import { writeFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { chromium, type Locator, type Page } from "playwright"
-import { ensureDirectory, getArgValue, waitForManualLoginIfNeeded, type RunnerOptions } from "./common"
-import { saveOrSubmit, waitForPublishPage } from "./adapters/dianxiaomi-adapter"
-import { loadSelectorConfig } from "./selector-config"
+import { ensureDirectory, getArgValue, waitForManualLoginIfNeeded, type RunnerOptions } from "../common"
+import { saveOrSubmit, waitForPublishPage } from "../adapters/dianxiaomi-adapter"
+import { loadSelectorConfig } from "../selector-config"
 
 const DEFAULT_PRODUCT_ID = "161406453261437092"
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..")
 const IMAGE_CHECK_BUTTON_KEYWORDS = ["\u56fe\u7247\u68c0\u6d4b", "\u68c0\u6d4b\u56fe\u7247"]
 const IMAGE_CHECK_CLOSE_KEYWORDS = ["\u5173\u95ed", "\u53d6\u6d88", "close", "cancel"]
 const IMAGE_CHECK_SAVE_KEYWORDS = ["\u4fdd\u5b58", "\u5e94\u7528", "\u786e\u8ba4", "save", "apply", "confirm"]

@@ -18,7 +18,7 @@
 
 **验证**:回写 label=「女装长裤」→ 商品过门变 ready;真实页面验证 `normalizeCategorySelection` status=done,逐层选中「服装、鞋靴和珠宝饰品 > 女士时尚 > 女装 > 女装长裤」。
 
-**工具**:回写脚本 [scripts/backfill-category-hint.mjs](../scripts/backfill-category-hint.mjs);单页验证 [verify-category-label-only.ts](../apps/automation/src/verify-category-label-only.ts);只读探测 [probe-readonly-category-state.ts](../apps/automation/src/probe-readonly-category-state.ts)。
+**工具**:回写脚本 [scripts/backfill-category-hint.mjs](../scripts/backfill-category-hint.mjs);单页验证 [verify-category-label-only.ts](../apps/automation/src/verify-category-label-only.ts);只读探测 [probe-readonly-category-state.ts](../apps/automation/src/probes/probe-readonly-category-state.ts)。
 
 ## 墙 2:媒体工具 — ⚠️ 部分解
 
@@ -52,7 +52,7 @@
 
 ## 墙 3 修复的 headless 验证(2026-06-30)
 
-`fetchProductImagesFromEditJson` 的核心假设(`edit.json` 暴露每色图 URL)已用只读探针 [probe-editjson-images.ts](../apps/automation/src/probe-editjson-images.ts) 在 4 个真实商品上验证 ✅:每色 6-7 图,去重后 10-15 张,远超「每色3图」下限,URL 是真实 pddpic/alicdn CDN。所以图片恢复对这批「页面引用型」商品确实能拿到图。
+`fetchProductImagesFromEditJson` 的核心假设(`edit.json` 暴露每色图 URL)已用只读探针 [probe-editjson-images.ts](../apps/automation/src/probes/probe-editjson-images.ts) 在 4 个真实商品上验证 ✅:每色 6-7 图,去重后 10-15 张,远超「每色3图」下限,URL 是真实 pddpic/alicdn CDN。所以图片恢复对这批「页面引用型」商品确实能拿到图。
 
 **但这只证明「图能捞到」,不证明「save 能过」**——按既往真跑实锤,save 真正撞的是 variant-remap `rowsAfter=0`(「主题颜色至少需要选一个」),颜色变种行没物化。完整 fill→save 真跑是 operator-attended(headed 浏览器、~15-20 分钟/件、headed 窗口只在操作者屏幕),需操作者在场才能继续。
 

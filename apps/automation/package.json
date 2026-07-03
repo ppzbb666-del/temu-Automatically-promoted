@@ -11,7 +11,7 @@
     "real-calibration": "tsx src/real-calibration.ts",
     "admission:calibrate": "tsx src/real-admission-calibration.ts",
     "restore:description": "tsx src/restore-description-payload.ts",
-    "probe:image-check-page-save": "tsx src/probe-image-check-page-save.ts",
+    "probe:image-check-page-save": "tsx src/probes/probe-image-check-page-save.ts",
     "report": "tsx src/report.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
