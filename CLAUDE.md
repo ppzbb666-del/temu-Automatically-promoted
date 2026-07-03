@@ -91,7 +91,8 @@ job 日志通用格式：`/jobs/:id/logs`。
 |---------|-----|
 | 理解产品边界和 KPI 定义 | [docs/operating-principles.md](docs/operating-principles.md) |
 | 了解生产路径 roadmap | [docs/roadmap-to-production.md](docs/roadmap-to-production.md) |
-| **看当前冲刺卡点（阻塞墙）** | [docs/blocking-walls-diagnosis.md](docs/blocking-walls-diagnosis.md) |
+| **跑 limit=3 试跑（当前任务，交接书）** | [docs/handoff-limit3-trial.md](docs/handoff-limit3-trial.md) |
+| 看当前冲刺卡点（阻塞墙） | [docs/blocking-walls-diagnosis.md](docs/blocking-walls-diagnosis.md) |
 | **看到「能用起来」的冲刺计划** | [docs/sprint-plan-to-usable.md](docs/sprint-plan-to-usable.md) |
 | Temu/店小秘字段要求矩阵 | [docs/temu-dianxiaomi-requirements-matrix.md](docs/temu-dianxiaomi-requirements-matrix.md) |
 | 看开发计划 | [docs/development-plan.md](docs/development-plan.md) |
