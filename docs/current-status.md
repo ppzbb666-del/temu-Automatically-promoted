@@ -4,15 +4,15 @@ Updated: 2026-07-04
 
 ## 当前卡点（先看这里）
 
-真实写链路推进到 `dry-run ✅ → fill-draft ✅（含媒体）→ save-draft ❌`。按 [blocking-walls-diagnosis.md](blocking-walls-diagnosis.md)：
+**写链路天花板已在单品上打通（2026-07-03 晚，真实页面实锤）**：商品 `id=161406453047896424`（~7 SKU）经 `queue-run`（`submitAfterSave=true`）跑完 `dry-run → fill-draft（含 image-translation + batch-resize）→ save-draft（「产品编辑成功」）→ submit-listing（「产品已提交发布」，publish state: publishing）`。证据：`.runtime/automation-artifacts/automation-full-flow-2026-07-03T19-49-49-946Z/`。三道墙在该商品上全部未触发：
 
-1. **墙 4 主题颜色/变种行**（save 被「主题颜色至少需要选一个」/ variant-remap `rowsAfter=0` 拒）—— 只读探针已就位，**适配代码未写**，当前最优先。
-2. **墙 3 图片恢复** —— `fetchProductImagesFromEditJson` 已写、headless 探针证明图能捞到，**完整 fill→save 真跑验证未做**（需 operator 在场 headed 跑）。
-3. **墙 2 image-editor 第二层** —— 未真修，靠白名单剔除 image-editor 绕过（默认媒体工具 = `image-translation` + `batch-resize`）。
+1. **墙 4 主题颜色/变种行** —— 该商品 `normalize-skc-pricing` skipped（本就一致），save 未被拒。**注意**：大 SKU 商品（322 SKU 的 `161406453261437092`）在 fill 阶段 variant-remap 时 OOM 崩溃，未验证；墙 4 对复杂商品是否真解仍未知。
+2. **墙 3 每色 3 图** —— `fetchProductImagesFromEditJson` 图片恢复真实生效，`fill-sku-image-links` done，save 未被「每色3图」拒。
+3. **墙 2 image-editor 第二层** —— 仍未真修，默认媒体工具白名单维持 `image-translation` + `batch-resize`（不含 image-editor），该配置下媒体门通过。
 
-唯一里程碑不变：limit=3 真实试跑全绿 → 解锁「开始无人值守」（[sprint-plan-to-usable.md](sprint-plan-to-usable.md)）。
+**下一步就是唯一里程碑**：limit=3 真实试跑全绿 → 解锁「开始无人值守」（[sprint-plan-to-usable.md](sprint-plan-to-usable.md)）。已知约束：本机内存紧（~2GB 空闲），优先挑小 SKU 商品；server 别用 `tsx watch` 跑（热重载会杀 full-flow 子进程）。
 
-代码健康快照（2026-07-04 实测）：全 workspace typecheck ✅、server+shared+extension 测试 ✅；`automation-runner.ts` 6077 行（已抽 6 个子模块）、`planner.ts` 4694 行、`dianxiaomi-adapter.ts` 15371 行、`App.tsx` 4466 行；存储已是 `node:sqlite`。
+代码健康快照（2026-07-04 实测）：全 workspace typecheck ✅、server+shared+extension 测试 ✅；`automation-runner.ts` 6077 行（已抽 6 个子模块）、`planner.ts` 4694 行、`dianxiaomi-adapter.ts` 15371 行、`App.tsx` 4466 行；存储已是 `node:sqlite`；已 `git init`（本地、无 remote）。
 
 ## Completed In This Iteration
 

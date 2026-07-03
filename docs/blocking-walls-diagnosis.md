@@ -67,3 +67,18 @@
 
 - Playwright headed 子进程不干净退出会留 `ms-playwright\chromium` 僵尸进程占 profile,但不一定有 SingletonLock。新 launch 卡死时,按可执行路径含 `ms-playwright` 杀(**不碰 Google Chrome**)。
 - 每个 full-flow 阶段都重新打开页面 + 重做变体重映射,单商品(变体多时)full-flow ~15-20 分钟,慢但正常。
+
+## 终局:单品全链实锤(2026-07-03 晚)
+
+商品 `id=161406453047896424`(~7 SKU)经 `POST /automation/queue-run`(`submitAfterSave=true`)在真实店小秘页面跑完全链:
+
+- save-draft:店小秘返回**「您的产品编辑成功!」**(墙 3「每色3图」、墙 4「主题颜色」均未触发;`fetchProductImagesFromEditJson` 图片恢复真实生效)。
+- submit-listing:第 1 次尝试成功,店小秘返回**「产品已提交发布,请在「发布中」、「发布失败」或「在线产品」中查看!」**,`publishOutcome.status=succeeded`。
+- 证据:`.runtime/automation-artifacts/automation-full-flow-2026-07-03T19-49-49-946Z/`(截图 + 结构化报告)。
+
+**遗留边界**:
+- 墙 4 只在小 SKU 商品上验证。322 SKU 的 `161406453261437092` 在 variant-remap 阶段 OOM 崩溃(本机 ~2GB 空闲内存),复杂商品未验证。
+- 墙 2 image-editor 第二层仍未真修,默认媒体白名单继续排除 image-editor。
+- server 别用 `tsx watch` 跑(热重载杀 full-flow 子进程);`POST /automation/full-flow` 只带 `url` 会 409,统一走 `queue-run`。
+
+下一战:limit=3 真实试跑([sprint-plan-to-usable.md](sprint-plan-to-usable.md) A4)。
