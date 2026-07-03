@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "Temu AI 自动上品助手",
+  "version": "0.1.0",
+  "description": "店小秘主控的 Temu 自动上品 AI 执行插件原型",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://localhost:5173/*",
+    "https://seller.temu.com/*",
+    "https://seller.kuajingmaihuo.com/*",
+    "https://www.dianxiaomi.com/*",
+    "https://erp.dianxiaomi.com/*",
+    "http://localhost:8787/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Temu AI 助手"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://localhost:5173/*",
+        "https://seller.temu.com/*",
+        "https://seller.kuajingmaihuo.com/*",
+        "https://www.dianxiaomi.com/*",
+        "https://erp.dianxiaomi.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "css": [
+        "src/content.css"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/panel.html",
+        "src/panel.css",
+        "src/panel.js"
+      ],
+      "matches": [
+        "http://localhost:5173/*",
+        "https://seller.temu.com/*",
+        "https://seller.kuajingmaihuo.com/*",
+        "https://www.dianxiaomi.com/*",
+        "https://erp.dianxiaomi.com/*"
+      ]
+    }
+  ]
+}

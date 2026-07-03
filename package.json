@@ -1,0 +1,20 @@
+{
+  "name": "temu-ai-ops",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:dashboard": "npm run dev --workspace @temu-ai-ops/dashboard",
+    "dev:server": "npm run dev --workspace @temu-ai-ops/server",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "test:smoke": "npm run test:smoke --workspace @temu-ai-ops/server"
+  },
+  "devDependencies": {
+    "playwright": "^1.59.1"
+  }
+}

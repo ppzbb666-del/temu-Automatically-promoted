@@ -1,0 +1,13 @@
+{
+  "name": "@temu-ai-ops/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-extension.mjs",
+    "test": "node scripts/build-extension.mjs --check && node scripts/check-panel-fixture.mjs"
+  },
+  "dependencies": {
+    "@temu-ai-ops/shared": "0.1.0"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@temu-ai-ops/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./llm-content": "./src/llm-content.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx test/pricing.test.ts && tsx test/automation-scope.test.ts && tsx test/llm-content.test.ts && tsx test/content.test.ts && tsx test/dianxiaomi-image-check.test.ts && tsx test/mock.test.ts"
+  }
+}

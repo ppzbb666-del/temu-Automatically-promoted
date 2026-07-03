@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM"],
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "jsx": "react-jsx",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@temu-ai-ops/shared": [
+        "packages/shared/src"
+      ],
+      "@temu-ai-ops/shared/*": [
+        "packages/shared/src/*"
+      ]
+    }
+  }
+}

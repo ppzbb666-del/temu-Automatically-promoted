@@ -1,0 +1,9 @@
+body {
+  margin: 0;
+  font-family: "Segoe UI", "PingFang SC", sans-serif;
+  background: #fff8f1;
+}
+
+#app {
+  padding: 20px;
+}

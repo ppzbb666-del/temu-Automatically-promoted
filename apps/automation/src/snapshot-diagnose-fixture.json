@@ -1,0 +1,60 @@
+{
+  "pageUrl": "https://www.dianxiaomi.com/mock-listing",
+  "pageTitle": "Mock Dianxiaomi Listing",
+  "createdAt": "2026-05-25T00:00:00.000Z",
+  "fields": [
+    {
+      "tagName": "input",
+      "type": "text",
+      "name": "productTitle",
+      "placeholder": "商品标题",
+      "ariaLabel": "",
+      "valuePreview": "",
+      "selectorHint": "input[name=\"productTitle\"]",
+      "nearbyText": "商品标题"
+    },
+    {
+      "tagName": "textarea",
+      "type": "",
+      "name": "description",
+      "placeholder": "商品描述",
+      "ariaLabel": "",
+      "valuePreview": "",
+      "selectorHint": "textarea[name=\"description\"]",
+      "nearbyText": "商品描述"
+    },
+    {
+      "tagName": "input",
+      "type": "number",
+      "name": "salePrice",
+      "placeholder": "售价",
+      "ariaLabel": "",
+      "valuePreview": "",
+      "selectorHint": "input[name=\"salePrice\"]",
+      "nearbyText": "SKU 售价"
+    },
+    {
+      "tagName": "input",
+      "type": "number",
+      "name": "stock",
+      "placeholder": "库存",
+      "ariaLabel": "",
+      "valuePreview": "",
+      "selectorHint": "input[name=\"stock\"]",
+      "nearbyText": "SKU 库存"
+    }
+  ],
+  "buttons": [
+    {
+      "text": "保存草稿",
+      "type": "button",
+      "selectorHint": "button.save"
+    }
+  ],
+  "skuRows": [
+    {
+      "rowText": "白色标准款 售价 库存",
+      "inputCount": 2
+    }
+  ]
+}
