@@ -3802,7 +3802,7 @@ export function App() {
                       ...current,
                       profile: event.target.value
                     }))}
-                    placeholder=".runtime/dianxiaomi-real-profile"
+                    placeholder=".runtime/playwright/dianxiaomi-profile"
                   />
                 </label>
                 <label>

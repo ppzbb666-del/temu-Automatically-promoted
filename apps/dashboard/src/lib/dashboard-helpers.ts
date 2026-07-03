@@ -77,7 +77,7 @@ export const defaultAutomationLaunchDraft = {
   url: "",
   taskFile: "",
   selectorConfig: "",
-  profile: ".runtime/dianxiaomi-real-profile",
+  profile: ".runtime/playwright/dianxiaomi-profile",
   screenshots: "",
   mediaAutomationMode: "unattended-apply",
   mediaAutomationTools: defaultDailyMediaAutomationTools.join("\n"),
