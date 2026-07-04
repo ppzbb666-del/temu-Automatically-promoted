@@ -30,11 +30,13 @@ import {
     getFullFlowJobTimeoutMs,
     getQueueDaemonStatePath,
     getRecoveryRunHistoryPath,
+    getQueueRunHistoryPath,
     getManualBudgetProofLedgerPath,
     getManualBudgetTrialHistoryPath,
     getProfileLockLedgerPath,
     RECOVERY_RUN_HISTORY_LIMIT,
     RECOVERY_RELEASE_HISTORY_LIMIT,
+    QUEUE_RUN_HISTORY_LIMIT,
     RECOVERY_MAX_CUMULATIVE_ATTEMPTS,
     MANUAL_BUDGET_PROOF_LEDGER_LIMIT,
     MANUAL_BUDGET_TRIAL_HISTORY_LIMIT,
@@ -4610,8 +4612,43 @@ export const startDianxiaomiQueueRun = (input: any = {}, options: Record<string,
         pricingRefresh
     };
     queueRunHistory.unshift(result);
-    queueRunHistory.splice(50);
+    queueRunHistory.splice(QUEUE_RUN_HISTORY_LIMIT);
+    persistQueueRunHistory();
     return result;
+};
+// Queue-run history persistence. Mirrors the recovery-run history pattern so the
+// limit=3 trial record (which the daily trial gate reads) survives a server
+// restart; without this queueRunHistory was in-memory only and the trial gate
+// re-locked on reboot. Path is overridable via QUEUE_RUN_HISTORY_PATH for test
+// isolation, default .runtime/data/queue-run-history.json, keeps 50 runs.
+const persistQueueRunHistory = () => {
+    const historyPath = getQueueRunHistoryPath();
+    mkdirSync(path.dirname(historyPath), {
+        recursive: true
+    });
+    writeFileSync(historyPath, JSON.stringify({
+        runs: queueRunHistory.slice(0, QUEUE_RUN_HISTORY_LIMIT)
+    }, null, 2), "utf8");
+};
+const loadQueueRunHistory = () => {
+    const historyPath = getQueueRunHistoryPath();
+    if (!existsSync(historyPath)) {
+        return;
+    }
+    try {
+        const parsed = JSON.parse(readFileSync(historyPath, "utf8"));
+        const runs = Array.isArray(parsed) ? parsed : Array.isArray(parsed.runs) ? parsed.runs : [];
+        queueRunHistory.length = 0;
+        for (const run of runs) {
+            if (run && typeof run === "object" && typeof run.id === "string") {
+                queueRunHistory.push(run);
+            }
+        }
+        queueRunHistory.splice(QUEUE_RUN_HISTORY_LIMIT);
+    }
+    catch {
+        queueRunHistory.length = 0;
+    }
 };
 export const listDianxiaomiQueueRuns = (limit = 20) => queueRunHistory.slice(0, limit);
 const cloneRecoveryRunItem = (item) => ({
@@ -5419,6 +5456,7 @@ const loadQueueDaemonState = () => {
 };
 const loadAutomationRunnerRuntimeState = () => {
     loadRecoveryRunHistory();
+    loadQueueRunHistory();
     loadManualBudgetProofLedger();
     loadManualBudgetTrialHistory();
     loadProfileLockAuditLedger();
@@ -5802,6 +5840,43 @@ export const tickDianxiaomiQueueDaemon = async () => {
     try {
         flowOutcomes = recoverQueueDaemonFlowOutcomes();
         const autoRetryReleasedIds = releaseAutoRetryDianxiaomiWorkItems(daemonStateHolder.current.input);
+        // When this daemon still has its own in-flight full-flow job(s), just wait
+        // for them — do NOT run the startup block check first. The running flow's
+        // Chromium child holds a lockfile inside the shared browser profile, which
+        // the startup block would misread as "profile locked by someone else" and
+        // pause the daemon (false positive). Our own flow owning the lock is normal,
+        // so this branch must precede queueDaemonStartupBlock.
+        const unresolvedFlowJobs = listQueueDaemonUnresolvedFlowJobs(daemonStateHolder.current.input);
+        if (unresolvedFlowJobs.length > 0) {
+            const finishedAt = new Date().toISOString();
+            const flowOutcomeReason = flowOutcomes.length > 0 ? summarizeQueueDaemonFlowOutcomes(flowOutcomes) : null;
+            const reason = [
+                `waiting for ${unresolvedFlowJobs.length} running full-flow job(s)`,
+                flowOutcomeReason
+            ].filter(Boolean).join("; ");
+            const tick = {
+                id,
+                startedAt,
+                finishedAt,
+                status: "skipped",
+                category: "awaiting-flow-completion",
+                reason,
+                queueRun: null,
+                recoveryRun: null,
+                flowOutcomes,
+                error: null
+            };
+            daemonStateHolder.current = {
+                ...daemonStateHolder.current,
+                running: false,
+                consecutiveFailures: 0,
+                lastFinishedAt: finishedAt,
+                lastError: null
+            };
+            pushQueueDaemonTick(tick);
+            scheduleQueueDaemonNextRun();
+            return tick;
+        }
         const startupBlock = queueDaemonStartupBlock(daemonStateHolder.current.input);
         if (startupBlock) {
             const consecutiveFailures = daemonStateHolder.current.consecutiveFailures + 1;
@@ -5856,37 +5931,6 @@ export const tickDianxiaomiQueueDaemon = async () => {
                 queueRun: null,
                 recoveryRun: null,
                 manualBudgetValidationRun: validationRun,
-                flowOutcomes,
-                error: null
-            };
-            daemonStateHolder.current = {
-                ...daemonStateHolder.current,
-                running: false,
-                consecutiveFailures: 0,
-                lastFinishedAt: finishedAt,
-                lastError: null
-            };
-            pushQueueDaemonTick(tick);
-            scheduleQueueDaemonNextRun();
-            return tick;
-        }
-        const unresolvedFlowJobs = listQueueDaemonUnresolvedFlowJobs(daemonStateHolder.current.input);
-        if (unresolvedFlowJobs.length > 0) {
-            const finishedAt = new Date().toISOString();
-            const flowOutcomeReason = flowOutcomes.length > 0 ? summarizeQueueDaemonFlowOutcomes(flowOutcomes) : null;
-            const reason = [
-                `waiting for ${unresolvedFlowJobs.length} running full-flow job(s)`,
-                flowOutcomeReason
-            ].filter(Boolean).join("; ");
-            const tick = {
-                id,
-                startedAt,
-                finishedAt,
-                status: "skipped",
-                category: "awaiting-flow-completion",
-                reason,
-                queueRun: null,
-                recoveryRun: null,
                 flowOutcomes,
                 error: null
             };

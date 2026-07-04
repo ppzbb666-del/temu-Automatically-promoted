@@ -30,12 +30,14 @@ export const getFullFlowJobTimeoutMs = () => DEFAULT_FULL_FLOW_JOB_TIMEOUT_MS;
 
 export const getQueueDaemonStatePath = () => process.env.QUEUE_DAEMON_STATE_PATH ?? path.join(getRepoRoot(), ".runtime/data/queue-daemon-state.json");
 export const getRecoveryRunHistoryPath = () => process.env.RECOVERY_RUN_HISTORY_PATH ?? path.join(getRepoRoot(), ".runtime/data/recovery-runs.json");
+export const getQueueRunHistoryPath = () => process.env.QUEUE_RUN_HISTORY_PATH ?? path.join(getRepoRoot(), ".runtime/data/queue-run-history.json");
 export const getManualBudgetProofLedgerPath = () => process.env.MANUAL_BUDGET_PROOF_LEDGER_PATH ?? path.join(getRepoRoot(), ".runtime/data/manual-budget-proof-ledger.json");
 export const getManualBudgetTrialHistoryPath = () => process.env.MANUAL_BUDGET_TRIAL_HISTORY_PATH ?? path.join(getRepoRoot(), ".runtime/data/manual-budget-trials.json");
 export const getProfileLockLedgerPath = () => process.env.PROFILE_LOCK_LEDGER_PATH ?? path.join(getRepoRoot(), ".runtime/data/profile-lock-ledger.json");
 
 export const RECOVERY_RUN_HISTORY_LIMIT = 50;
 export const RECOVERY_RELEASE_HISTORY_LIMIT = 50;
+export const QUEUE_RUN_HISTORY_LIMIT = 50;
 // P1-13: per-product / per-action cumulative recovery cap. After this many
 // recovery failures, release events can no longer un-pause the item; it must
 // go to the manual-step budget.

@@ -75,6 +75,7 @@ job 日志通用格式：`/jobs/:id/logs`。
 | `TASK_EXPORT_HISTORY_PATH` | 任务导出历史 | 隔离烟测用 |
 | `SELECTOR_DIAGNOSIS_DIRS` | 选择器诊断扫描根目录 | 多目录用 `:` 分隔 |
 | `RECOVERY_RUN_HISTORY_PATH` | recovery 批次历史 | 隔离用 |
+| `QUEUE_RUN_HISTORY_PATH` | queue-run 历史（含 limit=3 试跑记录，重启后试跑门靠它不回锁） | `.runtime/data/queue-run-history.json` |
 | `AUTOMATION_PRESET_PATH` | 自动化启动预设存储 | 隔离烟测用 |
 | `REAL_DIANXIAOMI_CALIBRATION_STALE_MINUTES` | 真实店小秘校准时效 | 30 ~ 10080 |
 | `ALLOW_DIANXIAOMI_SMOKE_URLS` | 允许 fixture/示例 URL 入队 | 烟测显式开启 |

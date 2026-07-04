@@ -3788,4 +3788,84 @@ const listedSmokeTaskExport = listTaskFileExports(20).find((item) => item.export
 assert(listedSmokeTaskExport, "task export history should include exported smoke task")
 assert.equal(listedSmokeTaskExport.launchStatus.status, "blocked", "task export history should expose launch status")
 
+// Regression: a daemon with its own in-flight full-flow job must NOT run the
+// startup block check first. The running flow's Chromium child holds a lockfile
+// inside the shared browser profile; the startup block would misread that as a
+// foreign lock and pause the daemon (consecutiveFailures++ → PAUSED). The
+// awaiting-flow-completion branch must precede queueDaemonStartupBlock so the
+// daemon simply waits for its own flow with consecutiveFailures reset to 0.
+const inFlightDaemonProfilePath = path.join(testDir, "in-flight-daemon-profile")
+mkdirSync(inFlightDaemonProfilePath, { recursive: true })
+const inFlightFlowWorkItem = saveDianxiaomiProductWorkItem({
+  id: "unit-in-flight-daemon-flow-work-item",
+  pageUrl: "https://www.dianxiaomi.com/product/edit/unit-in-flight-daemon-flow-work-item",
+  pageTitle: "In-flight daemon flow page",
+  title: "In-flight daemon flow work item",
+  categoryHint: { label: "Home & Garden" },
+  rawTextSample: "complete real listing with SKU and image signals",
+  notes: [],
+  snapshot: {
+    hasTitle: true,
+    imageCount: 2,
+    skuCount: 1,
+    priceFieldCount: 1,
+    stockFieldCount: 1,
+    attributeKeys: ["color"],
+    mediaToolSignals: ["image translation"]
+  },
+  status: "ready-for-automation"
+})
+// Start a real full-flow via queue-run so a genuine "running" job exists in the
+// flow registry. A real-dianxiaomi calibration for this URL lets the safety gate
+// admit it (queued:1). runFullFlow is void-ed (async), and the daemon tick reads
+// unresolved flows synchronously before its first await, so the job is
+// deterministically "running" at the moment awaiting-flow-completion is decided —
+// no dependence on the spawned automation child's timing.
+writeRealSelectorDiagnosis(
+  "dianxiaomi-diagnosis-unit-in-flight-daemon-flow.json",
+  inFlightFlowWorkItem.pageUrl,
+  "In-flight daemon flow real Dianxiaomi calibration"
+)
+const inFlightQueueRun = startDianxiaomiQueueRun({
+  limit: 1,
+  itemUrls: [inFlightFlowWorkItem.pageUrl],
+  profile: inFlightDaemonProfilePath,
+  selectorConfig: validSelectorConfigPath
+})
+assert.equal(inFlightQueueRun.queued, 1, "in-flight regression setup should start exactly one full-flow job")
+const inFlightFlowJobId = inFlightQueueRun.flowJobIds[0]
+assert(inFlightFlowJobId, "in-flight regression setup should expose the started flow job id")
+assert.equal(getDianxiaomiFullFlowJob(inFlightFlowJobId)?.status, "running", "the started full-flow job should be running when the daemon ticks")
+// Seed an ACTIVE daemon that already tracks this in-flight flow and is one
+// failure away from the pause threshold — proving the awaiting-flow branch both
+// avoids the pause and resets the failure counter.
+writeFileSync(process.env.QUEUE_DAEMON_STATE_PATH!, JSON.stringify({
+  status: "ACTIVE",
+  input: {
+    profile: inFlightDaemonProfilePath,
+    selectorConfig: validSelectorConfigPath,
+    limit: 1
+  },
+  intervalSeconds: 15,
+  maxConsecutiveFailures: 2,
+  consecutiveFailures: 1,
+  trackedFlowJobIds: [inFlightFlowJobId],
+  resolvedFlowJobIds: [],
+  flowOutcomes: [],
+  ticks: []
+}), "utf8")
+const restoredInFlightDaemon = restoreDianxiaomiQueueDaemon()
+assert.equal(restoredInFlightDaemon.status, "ACTIVE", "seeded in-flight daemon should restore active")
+assert.deepEqual(restoredInFlightDaemon.trackedFlowJobIds, [inFlightFlowJobId], "seeded daemon should track the in-flight flow")
+// The running flow's Chromium child would create a lockfile in the profile; the
+// old ordering read this as a foreign profile lock and paused the daemon.
+writeFileSync(path.join(inFlightDaemonProfilePath, "SingletonLock"), "lock held by this daemon's own running flow", "utf8")
+const inFlightTick = await tickDianxiaomiQueueDaemon()
+assert.equal(inFlightTick.category, "awaiting-flow-completion", "daemon with its own in-flight flow should wait, not run the startup block first")
+assert.equal(inFlightTick.status, "skipped", "awaiting-flow tick should be a skip, not a failure")
+const afterInFlightTickState = getDianxiaomiQueueDaemonState()
+assert.equal(afterInFlightTickState.status, "ACTIVE", "daemon must stay ACTIVE while its own flow runs, not self-pause on the profile lockfile")
+assert.equal(afterInFlightTickState.consecutiveFailures, 0, "awaiting-flow tick must reset consecutiveFailures to zero, not increment toward the pause threshold")
+pauseDianxiaomiQueueDaemon()
+
 console.log("automation runner mode safety tests passed")
