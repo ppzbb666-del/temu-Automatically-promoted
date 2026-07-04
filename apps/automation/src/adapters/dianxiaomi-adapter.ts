@@ -8163,6 +8163,75 @@ const findSkuImageCells = async (page: Page, maxRows = 40) => {
   return targets
 }
 
+// When findSkuImageCells returns zero cells we must tell two cases apart:
+//   1. the product genuinely has NO per-color variant image grid — its
+//      mainProductSkuSpecReqsList is a single empty placeholder spec
+//      ({specId:0, specName:""}), so no color rows and no "每色3图" requirement
+//      exist. Nothing to fill → the caller should SKIP, not fail (a failure here
+//      drops the whole fill report to "partial" and blocks save/submit).
+//   2. real color rows exist but the image cell selector missed them — a genuine
+//      selector/DOM problem the caller should still surface as a failure.
+// This counts the color-table rows (the color label column) that the image cells
+// would belong to. Zero color rows ⇒ case 1. See probe-editjson-variant-shape.
+const countPerColorVariantRows = async (page: Page): Promise<number> => {
+  const rows = page.locator(COLOR_SKC_ROW_SELECTOR)
+  const rowCount = await rows.count().catch(() => 0)
+  if (rowCount === 0) {
+    return 0
+  }
+  let withColorLabel = 0
+  const scan = Math.min(rowCount, 200)
+  for (let index = 0; index < scan; index += 1) {
+    const row = rows.nth(index)
+    if (!await row.isVisible().catch(() => false)) {
+      continue
+    }
+    const label = cleanVisibleText(
+      await row.locator("td[data-column-index='0']").first().innerText().catch(async () =>
+        row.locator("td").first().innerText().catch(() => "")
+      )
+    )
+    if (label) {
+      withColorLabel += 1
+    }
+  }
+  return withColorLabel
+}
+
+// Result for the "no SKU image cells found" branch: SKIP when the product has no
+// per-color variant image grid at all, otherwise FAIL (real selector/DOM issue).
+const skuImageCellsMissingResult = async (
+  page: Page,
+  imageUrls: string[],
+  extraDetails: Record<string, unknown>
+) => {
+  const perColorRows = await countPerColorVariantRows(page)
+  if (perColorRows === 0) {
+    return stepResult(
+      "fill-sku-image-links",
+      "Fill SKU image links",
+      "skipped",
+      "No per-color variant image cells on this Dianxiaomi product (empty variant spec); nothing to fill for the per-color image requirement",
+      {
+        perColorVariantRows: perColorRows,
+        totalImages: imageUrls.length,
+        ...extraDetails
+      }
+    )
+  }
+  return stepResult(
+    "fill-sku-image-links",
+    "Fill SKU image links",
+    "failed",
+    "SKU image cells were not found on the current Dianxiaomi page",
+    {
+      perColorVariantRows: perColorRows,
+      totalImages: imageUrls.length,
+      ...extraDetails
+    }
+  )
+}
+
 const captureSkuRepairScreenshot = async (
   page: Page,
   screenshotDir: string | undefined,
@@ -8830,19 +8899,12 @@ const fillSquarePreviewImageLinks = async (page: Page, imageUrls: string[], opti
 
   const skuCells = await findSkuImageCells(page, options.maxRows)
   if (skuCells.length === 0) {
-    return stepResult(
-      "fill-sku-image-links",
-      "Fill SKU image links",
-      "failed",
-      "SKU image cells were not found on the current Dianxiaomi page",
-      {
-        mode: "square-preview-all-colors",
-        totalImages: imageUrls.length,
-        materialImageUrls,
-        probedCandidates,
-        replacementUrls
-      }
-    )
+    return skuImageCellsMissingResult(page, imageUrls, {
+      mode: "square-preview-all-colors",
+      materialImageUrls,
+      probedCandidates,
+      replacementUrls
+    })
   }
 
   const target = skuCells[0]!
@@ -9013,17 +9075,10 @@ export const fillSkuImageLinks = async (page: Page, imageUrls: string[], options
 
   const skuCells = await findSkuImageCells(page, options.maxRows)
   if (skuCells.length === 0) {
-    return stepResult(
-      "fill-sku-image-links",
-      "Fill SKU image links",
-      "failed",
-      "SKU image cells were not found on the current Dianxiaomi page",
-      {
-        totalImages: imageUrls.length,
-        probedImages,
-        selectedCandidates: selected
-      }
-    )
+    return skuImageCellsMissingResult(page, imageUrls, {
+      probedImages,
+      selectedCandidates: selected
+    })
   }
 
   const urlsForReplacement = fillSkuImageUrlCount(replacementCandidateUrls, Math.max(SKU_IMAGE_MIN_COUNT, 3))
