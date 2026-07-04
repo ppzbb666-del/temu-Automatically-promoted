@@ -1,6 +1,6 @@
 # Operating Principles
 
-Updated: 2026-06-01
+Updated: 2026-07-05
 
 This project is optimized for unattended Dianxiaomi-to-Temu listing. The default product path must stay narrow: use Dianxiaomi-collected products, automatically edit/list through Dianxiaomi, click Dianxiaomi publish, then stop before Temu pricing approval and final listing.
 
@@ -54,3 +54,18 @@ AI features enter the default flow only when they reduce manual work. A feature 
 - Higher automatic pass rate without increasing manual triggers.
 
 AI features that only add explanation, extra review text, or another screen stay in `高级区` until they meet this gate.
+
+## Full-Automation & Multi-Customer Rule
+
+The product goal is that **every product completes the default flow with zero human input** (up to the two permanent Temu-side manual steps), and the system will be **deployed for other customers** whose accounts, categories, and page shapes we cannot predict. Two consequences bind every adapter change:
+
+**Adaptation ladder (in order of preference):**
+
+1. **Generic mechanism first** — read what the live page actually requires (modal columns, field labels, error feedback) and respond dynamically. Example: the generic size-chart filler that derives metric values from however many columns the modal exposes.
+2. **Category/shape defaults as optimization only** — hardcoded tables (e.g. `PET_CLOTHES_SIZE_CHART_DEFAULTS`) may improve value quality for known categories, but the flow must still succeed when the table misses. A hardcoded table without a generic fallback behind it is a defect, not a fix.
+3. **Built-in LLM fallback for semantic gaps** — where a rule cannot decide (odd category names, ambiguous field semantics, free-text requirements), the project itself may call the configured LLM (`LLM_*` envs, same graceful-degradation contract as llm-content: no key or failure → deterministic fallback, never a crash). The LLM call lives in the codebase and runs unattended — "use AI" never means "a human asks an assistant mid-run".
+4. **Manual only as budgeted exception** — anything still manual needs a Manual Step Budget entry (why / replacement / owner / sunset) and stays in `高级区`.
+
+**No customer-specific hardcoding in the default path.** Account names, store names, product IDs, and category quirks of the current test account must not be load-bearing. Anything tuned to this account is calibration data (`.runtime/`, selector configs, defaults tables) — replaceable per customer — never control flow.
+
+Practical test for any fix: *"would this still work on a stranger's Dianxiaomi account selling a category we've never seen?"* If no, add the generic rung below it.
