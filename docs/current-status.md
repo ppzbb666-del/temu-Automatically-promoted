@@ -8,11 +8,11 @@ Updated: 2026-07-04
 
 **规模化前的三道拦路（按优先级）**：
 
-1. **OOM（最硬）**：322 SKU 必崩、新商品 62 SKU 也崩过；账号里没有 ≤30 SKU 的商品，只有 62/189/322 三档。诊断 + 四层方案见 [oom-mitigation-plan.md](oom-mitigation-plan.md)；**层 1 代码防护（视口截图、SKU 上限门、空闲内存预检、headless 默认）尚未实现**。当前靠人工把大/未知商品 block 在队列外，ready 池只放已验证商品。
+1. **OOM（最硬）**：322 SKU 必崩、新商品 62 SKU 也崩过；账号里没有 ≤30 SKU 的商品，只有 62/189/322 三档。诊断 + 四层方案见 [oom-mitigation-plan.md](oom-mitigation-plan.md)。**层 1 四项代码防护已实现**（2026-07-04，commit `cb83673`）：视口截图默认（`UNATTENDED_FULLPAGE_SCREENSHOTS`）、SKU 上限门（`UNATTENDED_MAX_SKU=200`，超限跳过记 `sku-count-over-cap`）、空闲内存预检（`UNATTENDED_MIN_FREE_MEM_MB=3072`，不足时 tick 干净等待不计失败）、无人值守默认 headless；含回归测试。**真实验证未做**：62-SKU 商品在层 0（关大程序）+ 层 1 下重跑 full-flow 是下一个动作。
 2. ~~守护进程自暂停误伤~~ **已修**（2026-07-04，commit `99527e0`）：awaiting-flow-completion 分支挪到 startup-block 之前，自己的 in-flight flow 持有 profile lockfile 不再被误判暂停；含回归测试。
 3. ~~queue-run 历史重启即丢~~ **已修**（同 commit）：`QUEUE_RUN_HISTORY_PATH` 持久化（默认 `.runtime/data/queue-run-history.json`，保留 50 条），试跑门不再因 server 重启回锁。
 
-**下一步**：① 实现 OOM 层 1 四项防护；② 重启 daemon 验证两个修复在真实环境生效（跨越一条 full-flow 全程不自暂停）；③ 62-SKU 商品在层 0（关大程序腾内存）+ 层 1 生效后重试 full-flow。
+**下一步（全部是真实环境验证，代码已就绪）**：① 层 0 关大程序腾内存（VS Code 多窗口/Edge/微信 ≈ 4GB）；② 重启 server + daemon，用 62-SKU 商品重跑 full-flow（同时验证 daemon 不自暂停、insufficient-memory 分支、headless 路径）；③ 62 稳定后按 [oom-mitigation-plan.md](oom-mitigation-plan.md) 层 2/3 决定 322 SKU 的路线。
 
 试跑验收流程与实战坑统一看 [limit-3-trial-acceptance.md](limit-3-trial-acceptance.md)（原 handoff-limit3-trial.md 已并入并删除）。
 
