@@ -8,7 +8,7 @@ Updated: 2026-07-05
 
 **规模化前的拦路（按优先级；2026-07-05 尺码表修复后更新）**：
 
-1. ~~尺码表适配缺品类默认值~~ **已修并真机验证**（commit `6e56654`）：宠物商品 `161406453047896984` 的 save 曾被「请完善尺码表1的信息」硬拒——`applyManualSizeChartFallback` 只覆盖女下装/女上装/文胸，猫狗服饰命中不到默认值 → 弹窗被关、尺码表留空。先用只读探针 `probe-size-chart-structure` dump 出该品类弹窗真实列（尺码分类=猫狗服饰，三列 metric：胸围全围/颈围/背长，尺码 XS…5XL），据此加 `PET_CLOTHES_SIZE_CHART_DEFAULTS`（3 metric/尺码）+ 抽出共享 `fillSizeChartTable` 行填充器 + **通用兜底**（任何未配置品类按弹窗列数动态生成递增 cm 值）。真机复跑：`normalize-size-chart`=done（猫狗服饰，28/28 metric 输入全填），fill=completed，**save 返回「产品编辑成功」**。submit 被另一无关问题挡住（见下一步①）。
+1. ~~尺码表适配缺品类默认值~~ **已修并真机验证**（commit `ccde6e8`）：宠物商品 `161406453047896984` 的 save 曾被「请完善尺码表1的信息」硬拒——`applyManualSizeChartFallback` 只覆盖女下装/女上装/文胸，猫狗服饰命中不到默认值 → 弹窗被关、尺码表留空。先用只读探针 `probe-size-chart-structure` dump 出该品类弹窗真实列（尺码分类=猫狗服饰，三列 metric：胸围全围/颈围/背长，尺码 XS…5XL），据此加 `PET_CLOTHES_SIZE_CHART_DEFAULTS`（3 metric/尺码）+ 抽出共享 `fillSizeChartTable` 行填充器 + **通用兜底**（任何未配置品类按弹窗列数动态生成递增 cm 值）。真机复跑：`normalize-size-chart`=done（猫狗服饰，28/28 metric 输入全填），fill=completed，**save 返回「产品编辑成功」**。submit 被另一无关问题挡住（见下一步①）。
 2. ~~新商品 fill 卡 SKU 图片格~~ **已修并真机验证**（commit `9c2dfdf`）：根因不是 DOM 形态——该商品 `edit.json` 的变体 spec 是单个空占位（无颜色名/无每色图要求），0 个图片格是正确现实。`fill-sku-image-links` 现在区分「无每色变体行 → skipped」和「有色行但选择器没匹配 → 仍 failed」。真机复跑：fill 报告 completed，流程首次推进到 save 阶段。新增只读探针 probe-editjson-variant-shape / probe-sku-image-cell-shape。
 3. **OOM 层 1 防护已实现且部分真机验证**（commit `cb83673`）：headless 默认 ✅、daemon 跨自有 flow 不自暂停 ✅（三轮 flow 期间 failures 始终 0）、queue-run 历史持久化 ✅。SKU 上限门与 insufficient-memory 分支有回归测试、真机未触发。
 
