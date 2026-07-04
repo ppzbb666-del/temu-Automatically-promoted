@@ -6,13 +6,14 @@ Updated: 2026-07-05
 
 **无人值守已跑通第一轮到 Temu 核价交接（2026-07-04 凌晨）**：守护进程自主入队 189-SKU 商品并完成全链（save「产品编辑成功」+ submit「产品已提交发布」，~16 分钟）。冲刺计划 A1–A5 全部走过一遍，产品形态上「能用起来」了。
 
-**规模化前的拦路（按优先级；2026-07-05 尺码表修复后更新）**：
+**规模化前的拦路（按优先级；2026-07-05 轮播图1:1机制修复后更新）**：
 
-1. ~~尺码表适配缺品类默认值~~ **已修并真机验证**（commit `ccde6e8`）：宠物商品 `161406453047896984` 的 save 曾被「请完善尺码表1的信息」硬拒——`applyManualSizeChartFallback` 只覆盖女下装/女上装/文胸，猫狗服饰命中不到默认值 → 弹窗被关、尺码表留空。先用只读探针 `probe-size-chart-structure` dump 出该品类弹窗真实列（尺码分类=猫狗服饰，三列 metric：胸围全围/颈围/背长，尺码 XS…5XL），据此加 `PET_CLOTHES_SIZE_CHART_DEFAULTS`（3 metric/尺码）+ 抽出共享 `fillSizeChartTable` 行填充器 + **通用兜底**（任何未配置品类按弹窗列数动态生成递增 cm 值）。真机复跑：`normalize-size-chart`=done（猫狗服饰，28/28 metric 输入全填），fill=completed，**save 返回「产品编辑成功」**。submit 被另一无关问题挡住（见下一步①）。
-2. ~~新商品 fill 卡 SKU 图片格~~ **已修并真机验证**（commit `9c2dfdf`）：根因不是 DOM 形态——该商品 `edit.json` 的变体 spec 是单个空占位（无颜色名/无每色图要求），0 个图片格是正确现实。`fill-sku-image-links` 现在区分「无每色变体行 → skipped」和「有色行但选择器没匹配 → 仍 failed」。真机复跑：fill 报告 completed，流程首次推进到 save 阶段。新增只读探针 probe-editjson-variant-shape / probe-sku-image-cell-shape。
-3. **OOM 层 1 防护已实现且部分真机验证**（commit `cb83673`）：headless 默认 ✅、daemon 跨自有 flow 不自暂停 ✅（三轮 flow 期间 failures 始终 0）、queue-run 历史持久化 ✅。SKU 上限门与 insufficient-memory 分支有回归测试、真机未触发。
+1. **轮播图未达 1:1 → submit 被拒（当前最前排；实际卡点已转移）**：宠物商品 `161406453047896984` submit 被「错误：产品轮播图必须1:1尺寸」拒。按 Full-Automation 阶梯先只读探针 dump 原生媒体工具（commit `598d0a2`）：`批量改图片尺寸` 弹窗 mode 选择有「等比例调整」（现用，保原比例，永远不 1:1）和「自定义比例调整」，后者的比例下拉给 `保持原图比例 / 1:1 / 3:4 / 4:3 / 9:16 / 16:9`。据此改 `prepareBatchResizeDialog`：优先选「自定义比例调整」+「1:1」（读弹窗实际选项，缺则回退等比例短边）；并把「产品轮播图必须1:1尺寸」归类为 `media-processing` + `autoRetryRecommended=true`（原为 unknown），失败自动重试。**但真机复跑 submit 仍被 1:1 拒**——因为 **media apply 被整体 skip 了**：`batch-resize`+`image-translation` 在该商品页报 `missing-tool`（日志 `media processing plan completed (skipped)`），batch-resize 根本没跑到。这是一个**独立的、先于本次的媒体工具发现缺陷**（工具在「crop 编辑图片」下拉里确实存在，探针能找到，但 `collectMediaToolCandidates`/`findImageOptionsMenuAction` 在 fill 阶段发现不了它们；我加的 scroll+加长轮询没解决）。→ **真正的下一道门是媒体工具发现，不是 1:1 机制本身**。1:1 机制正确、就绪，工具被发现后即生效。
+2. ~~尺码表适配缺品类默认值~~ **已修并真机验证**（commit `ccde6e8`）：宠物商品 save 曾被「请完善尺码表1的信息」硬拒。只读探针 dump 出弹窗真实列（猫狗服饰，三列 胸围全围/颈围/背长，XS…5XL），加 `PET_CLOTHES_SIZE_CHART_DEFAULTS` + 共享 `fillSizeChartTable` + **通用兜底**。真机复跑 `normalize-size-chart`=done（28/28 输入全填），**save 返回「产品编辑成功」**。
+3. ~~新商品 fill 卡 SKU 图片格~~ **已修并真机验证**（commit `9c2dfdf`）：根因是 `edit.json` 变体 spec 为空占位（无每色图要求）。`fill-sku-image-links` 区分「无每色变体行 → skipped」和「有色行但选择器没匹配 → 仍 failed」。
+4. **OOM 层 1 防护已实现且部分真机验证**（commit `cb83673`）：headless 默认、daemon 跨自有 flow 不自暂停、queue-run 历史持久化；SKU 上限门 + insufficient-memory 分支有回归测试。
 
-**下一步**：① 宠物商品 submit 被「错误：产品轮播图必须1:1尺寸」挡住（图片比例，非尺码表问题）——查图片比例归一化/白底工具能否补 1:1；② 过 submit 后 62-SKU OOM 重验与批量扩池。
+**下一步**：① **媒体工具发现**——查为什么 `batch-resize`/`image-translation` 在 fill 阶段报 `missing-tool`（工具在「crop 编辑图片」下拉里，探针能开出来）；发现修好后 1:1 机制即生效、submit 应过。② ladder-L3 LLM 品类映射兜底（已在 `KNOWN_CATEGORY_RECOVERY_PATHS` 上方立 TODO，不阻塞）。③ 过 submit 后把其余 blocked 新商品逐个放回 ready 让 daemon 消化、记录每个新门；然后 62-SKU OOM 重验与批量扩池。
 
 **层 0 提示**：跑批前关 Edge/微信可从 ~3.0GB 腾到 ~4.2GB（实测）；VS Code 多窗口是最大占用（~1.4GB），能关更好。
 
