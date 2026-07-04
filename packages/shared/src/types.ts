@@ -71,6 +71,7 @@ export type DianxiaomiWorkFailureCategory =
   | "target-surface"
   | "task-file"
   | "browser-profile"
+  | "sku-count-over-cap"
   | "unknown"
 
 export type DianxiaomiWorkFailureDiagnosis = {
@@ -1154,6 +1155,7 @@ export type AutomationQueueDaemonTick = {
     | "flow-outcome-recovered"
     | "recovery-run-started"
     | "validation-rerun-started"
+    | "insufficient-memory"
   reason?: string
   queueRun: AutomationQueueRunStartResult | null
   recoveryRun: AutomationRecoveryRun | null

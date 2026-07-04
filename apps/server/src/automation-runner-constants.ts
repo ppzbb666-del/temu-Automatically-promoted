@@ -62,6 +62,20 @@ export const clampInteger = (value, fallback, min, max) => {
 export const getProfileLockStaleMs = () => clampInteger(Number.parseInt(process.env.PROFILE_LOCK_STALE_MINUTES ?? "", 10), DEFAULT_PROFILE_LOCK_STALE_MS / 60_000, 5, 7 * 24 * 60) * 60_000;
 export const getRealCalibrationStaleMs = () => clampInteger(Number.parseInt(process.env.REAL_DIANXIAOMI_CALIBRATION_STALE_MINUTES ?? "", 10), DEFAULT_REAL_CALIBRATION_STALE_MS / 60_000, 30, 7 * 24 * 60) * 60_000;
 
+// OOM mitigation (layer 1). See docs/oom-mitigation-plan.md.
+// Unattended selection skips work items whose stored snapshot.skuCount exceeds
+// this cap — large variant grids are the products that OOM the browser during
+// fill-stage variant-remap (operator measured 189 stable, 322 crashes). Read the
+// ALREADY-STORED snapshot; never open a page to probe (dry-run also triggers
+// variant-remap). Default 200; clamp 1..2000.
+export const DEFAULT_UNATTENDED_MAX_SKU = 200;
+export const getUnattendedMaxSku = () => clampInteger(Number.parseInt(process.env.UNATTENDED_MAX_SKU ?? "", 10), DEFAULT_UNATTENDED_MAX_SKU, 1, 2000);
+// Before spawning a full-flow, the daemon checks host free memory; below this
+// floor it defers the tick (clean wait, not a failure) so a low-memory host
+// doesn't crash a browser mid-run. Default 3072 MB; clamp 256..131072.
+export const DEFAULT_UNATTENDED_MIN_FREE_MEM_MB = 3072;
+export const getUnattendedMinFreeMemMb = () => clampInteger(Number.parseInt(process.env.UNATTENDED_MIN_FREE_MEM_MB ?? "", 10), DEFAULT_UNATTENDED_MIN_FREE_MEM_MB, 256, 131072);
+
 export const formatDurationCompact = (durationMs) => {
     const minutes = Math.max(1, Math.round(durationMs / 60_000));
     if (minutes < 60) {

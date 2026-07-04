@@ -6,6 +6,7 @@ import {
   ensureDirectory,
   getOptions,
   loadTask,
+  unattendedFullPageScreenshots,
   waitForManualLoginIfNeeded,
   type RunnerOptions
 } from "./common"
@@ -29,7 +30,7 @@ const captureArtifacts = async (page: Page, screenshotDir: string, name: string)
   const screenshotPath = path.join(screenshotDir, `${name}-${timestamp}.png`)
   await page.screenshot({
     path: screenshotPath,
-    fullPage: true
+    fullPage: unattendedFullPageScreenshots()
   })
   console.log(`Saved screenshot: ${screenshotPath}`)
   return screenshotPath

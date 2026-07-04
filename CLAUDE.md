@@ -79,6 +79,9 @@ job 日志通用格式：`/jobs/:id/logs`。
 | `AUTOMATION_PRESET_PATH` | 自动化启动预设存储 | 隔离烟测用 |
 | `REAL_DIANXIAOMI_CALIBRATION_STALE_MINUTES` | 真实店小秘校准时效 | 30 ~ 10080 |
 | `ALLOW_DIANXIAOMI_SMOKE_URLS` | 允许 fixture/示例 URL 入队 | 烟测显式开启 |
+| `UNATTENDED_MAX_SKU` | 无人值守选品 SKU 上限；`snapshot.skuCount` 超过则跳过并记 `sku-count-over-cap`（防 variant-remap OOM，只读已存快照） | `200`（1~2000） |
+| `UNATTENDED_MIN_FREE_MEM_MB` | spawn full-flow 前的空闲内存下限；低于则 tick 记 `insufficient-memory` 干净等待（不计失败） | `3072`（256~131072） |
+| `UNATTENDED_FULLPAGE_SCREENSHOTS` | 自动化截图是否整页；默认视口截图省内存，校准/排查可显式开 | `false` |
 | `LLM_API_KEY` | 内容生成大模型 key；**不设=禁用**，纯规则回退 | 无（禁用） |
 | `LLM_BASE_URL` | OpenAI 兼容基址（DeepSeek/Qwen/OpenAI/vLLM） | `https://api.openai.com/v1` |
 | `LLM_MODEL` | 模型名 | `gpt-4o-mini` |

@@ -24,6 +24,10 @@ const cases: Array<{
   { name: "target surface", reason: "write-blocked-wrong-surface", category: "target-surface", retryable: false, autoRetry: false },
   { name: "profile lock", reason: "profile is locked singletonlock", category: "browser-profile", retryable: true, autoRetry: false },
   { name: "browser crash/OOM", reason: "browser process disconnected out of memory", category: "browser-profile", retryable: true, autoRetry: true },
+  // OOM mitigation (layer 1, item ②): the sku-count-over-cap reason string itself
+  // contains "oom"; it must classify as sku-count-over-cap (checked first), NOT
+  // fall through to the browser-crash auto-retry branch.
+  { name: "sku count over cap", reason: "sku-count-over-cap: 322 SKU exceeds UNATTENDED_MAX_SKU 200; skipped to avoid variant-remap OOM", category: "sku-count-over-cap", retryable: false, autoRetry: false },
   { name: "task file", reason: "could not export automation task", category: "task-file", retryable: true, autoRetry: true },
   { name: "media processing", reason: "media processing failed during batch resize", category: "media-processing", retryable: false, autoRetry: false },
   { name: "publish validation", reason: "missing required attribute Color", category: "publish-validation", retryable: true, autoRetry: false },

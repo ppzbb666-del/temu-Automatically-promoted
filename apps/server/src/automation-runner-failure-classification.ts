@@ -14,6 +14,20 @@ export const classifyDianxiaomiWorkFailure = (reason, source = "queue-daemon"): 
         source: source as DianxiaomiWorkFailureDiagnosis["source"],
         updatedAt: new Date().toISOString()
     };
+    // OOM mitigation (layer 1, item ②): an item skipped for exceeding
+    // UNATTENDED_MAX_SKU is not a transient failure — auto-retrying would just
+    // skip it again. It needs an operator to reduce the variant grid or raise the
+    // cap. Checked FIRST so the "oom" token in its reason string does not fall
+    // through to the browser-crash auto-retry branch below.
+    if (includesAny(["sku-count-over-cap"])) {
+        return {
+            ...base,
+            category: "sku-count-over-cap",
+            retryable: false,
+            autoRetryRecommended: false,
+            nextAction: "This product's SKU count exceeds the unattended cap (UNATTENDED_MAX_SKU). Reduce the variant grid, run it on a higher-memory host, or raise the cap explicitly before retrying."
+        };
+    }
     if (includesAny(["login", "captcha", "verify", "verification", "楠岃瘉鐮?", "验证码", "登录", "鐧诲綍"])) {
         return {
             ...base,

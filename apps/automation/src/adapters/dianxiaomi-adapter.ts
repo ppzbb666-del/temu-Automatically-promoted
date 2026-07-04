@@ -8,6 +8,7 @@ import {
   firstVisible,
   inspectManualLoginSurface,
   normalizeText,
+  unattendedFullPageScreenshots,
   type RunnerOptions
 } from "../common"
 import { findByConfiguredSelectors, loadSelectorConfig, type DianxiaomiSelectorConfig } from "../selector-config"
@@ -8178,7 +8179,7 @@ const captureSkuRepairScreenshot = async (
   )
   await page.screenshot({
     path: screenshotPath,
-    fullPage: true
+    fullPage: unattendedFullPageScreenshots()
   }).catch(() => undefined)
   return screenshotPath
 }
@@ -13457,7 +13458,7 @@ const captureMediaScreenshot = async (page: Page, screenshotDir: string, prefix:
   )
   await page.screenshot({
     path: screenshotPath,
-    fullPage: true
+    fullPage: unattendedFullPageScreenshots()
   })
   return screenshotPath
 }
@@ -13589,7 +13590,7 @@ const openUnattendedMediaTools = async (
       )
       await page.screenshot({
         path: screenshotPath,
-        fullPage: true
+        fullPage: unattendedFullPageScreenshots()
       })
 
       tool.clicked = true

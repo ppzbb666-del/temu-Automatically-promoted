@@ -56,6 +56,16 @@ export const parseBoolean = (value: string | undefined, fallback: boolean) => {
   return ["1", "true", "yes", "y", "on"].includes(value.toLowerCase())
 }
 
+// OOM mitigation (layer 1): fullPage screenshots of a several-hundred-SKU edit
+// page can be tens of thousands of pixels tall and are the single largest
+// per-capture memory spike in the render process. Default to viewport-only
+// captures; calibration/debugging can opt back in with
+// UNATTENDED_FULLPAGE_SCREENSHOTS=true. Evidence still preserved, just not a
+// full-page bitmap. See docs/oom-mitigation-plan.md layer 1.
+export const unattendedFullPageScreenshots = (): boolean =>
+  parseBoolean(process.env.UNATTENDED_FULLPAGE_SCREENSHOTS, false)
+
+
 const parseMediaAutomationMode = (value: string | undefined): MediaAutomationMode => {
   if (value === "unattended-open" || value === "unattended-apply") {
     return value

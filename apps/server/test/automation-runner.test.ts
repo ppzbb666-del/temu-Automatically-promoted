@@ -3868,4 +3868,114 @@ assert.equal(afterInFlightTickState.status, "ACTIVE", "daemon must stay ACTIVE w
 assert.equal(afterInFlightTickState.consecutiveFailures, 0, "awaiting-flow tick must reset consecutiveFailures to zero, not increment toward the pause threshold")
 pauseDianxiaomiQueueDaemon()
 
+// OOM mitigation (layer 1, item ②): queue-run must skip a ready item whose STORED
+// snapshot.skuCount exceeds UNATTENDED_MAX_SKU, recording it as sku-count-over-cap
+// and blocking it — never spawning a full-flow (large variant grids OOM at
+// fill-stage variant-remap). No page is opened to learn the count.
+const previousMaxSkuEnv = process.env.UNATTENDED_MAX_SKU
+process.env.UNATTENDED_MAX_SKU = "200"
+const overCapWorkItem = saveDianxiaomiProductWorkItem({
+  id: "unit-oom-over-cap-work-item",
+  pageUrl: "https://www.dianxiaomi.com/product/edit/unit-oom-over-cap-work-item",
+  pageTitle: "Over-cap SKU page",
+  title: "Over-cap SKU work item",
+  categoryHint: { label: "Home & Garden" },
+  rawTextSample: "complete real listing with SKU and image signals",
+  notes: [],
+  snapshot: {
+    hasTitle: true,
+    imageCount: 2,
+    skuCount: 250,
+    priceFieldCount: 1,
+    stockFieldCount: 1,
+    attributeKeys: ["color"],
+    mediaToolSignals: ["image translation"]
+  },
+  status: "ready-for-automation"
+})
+assert.equal(overCapWorkItem.status, "ready-for-automation", "over-cap fixture should start ready")
+const overCapRun = startDianxiaomiQueueRun({
+  limit: 3,
+  itemUrls: [overCapWorkItem.pageUrl],
+  selectorConfig: validSelectorConfigPath
+})
+assert.equal(overCapRun.queued, 0, "over-cap item must not spawn a full-flow job")
+assert.equal(overCapRun.skipped, 1, "over-cap item must be recorded as skipped")
+assert.equal(overCapRun.skippedItems[0]?.workItemId, overCapWorkItem.id, "skip entry should name the over-cap work item")
+assert.match(overCapRun.skippedItems[0]?.reason ?? "", /sku-count-over-cap/, "skip reason should be sku-count-over-cap")
+const blockedOverCapItem = getDianxiaomiProductWorkItem(overCapWorkItem.id)
+assert.equal(blockedOverCapItem?.status, "blocked", "over-cap item should be moved to blocked")
+assert.equal(blockedOverCapItem?.failureDiagnosis?.category, "sku-count-over-cap", "over-cap diagnosis should classify as sku-count-over-cap")
+assert.equal(blockedOverCapItem?.failureDiagnosis?.autoRetryRecommended, false, "over-cap item must not be auto-retried")
+if (previousMaxSkuEnv === undefined) {
+  delete process.env.UNATTENDED_MAX_SKU
+} else {
+  process.env.UNATTENDED_MAX_SKU = previousMaxSkuEnv
+}
+
+// OOM mitigation (layer 1, item ③): when host free memory is below
+// UNATTENDED_MIN_FREE_MEM_MB and there is spawnable ready work, the daemon tick
+// defers as a clean wait (category insufficient-memory), not a failure — it must
+// stay ACTIVE with consecutiveFailures 0 instead of counting toward a pause.
+const previousMinFreeMemEnv = process.env.UNATTENDED_MIN_FREE_MEM_MB
+process.env.UNATTENDED_MIN_FREE_MEM_MB = "131072" // 128 GB floor — always above real free memory in CI
+const memGateWorkItem = saveDianxiaomiProductWorkItem({
+  id: "unit-oom-mem-gate-work-item",
+  pageUrl: "https://www.dianxiaomi.com/product/edit/unit-oom-mem-gate-work-item",
+  pageTitle: "Memory gate page",
+  title: "Memory gate work item",
+  categoryHint: { label: "Home & Garden" },
+  rawTextSample: "complete real listing with SKU and image signals",
+  notes: [],
+  snapshot: {
+    hasTitle: true,
+    imageCount: 2,
+    skuCount: 5,
+    priceFieldCount: 1,
+    stockFieldCount: 1,
+    attributeKeys: ["color"],
+    mediaToolSignals: ["image translation"]
+  },
+  status: "ready-for-automation"
+})
+assert.equal(memGateWorkItem.status, "ready-for-automation", "memory-gate fixture should start ready")
+const memGateProfilePath = path.join(testDir, "oom-mem-gate-profile")
+mkdirSync(memGateProfilePath, { recursive: true })
+writeRealSelectorDiagnosis(
+  "dianxiaomi-diagnosis-unit-oom-mem-gate.json",
+  memGateWorkItem.pageUrl,
+  "Memory gate real Dianxiaomi calibration"
+)
+writeFileSync(process.env.QUEUE_DAEMON_STATE_PATH!, JSON.stringify({
+  status: "ACTIVE",
+  input: {
+    profile: memGateProfilePath,
+    selectorConfig: validSelectorConfigPath,
+    itemUrls: [memGateWorkItem.pageUrl],
+    limit: 1
+  },
+  intervalSeconds: 15,
+  maxConsecutiveFailures: 2,
+  consecutiveFailures: 1,
+  trackedFlowJobIds: [],
+  resolvedFlowJobIds: [],
+  flowOutcomes: [],
+  ticks: []
+}), "utf8")
+restoreDianxiaomiQueueDaemon()
+const memGateTick = await tickDianxiaomiQueueDaemon()
+assert.equal(memGateTick.category, "insufficient-memory", "low free memory with spawnable work should defer the tick")
+assert.equal(memGateTick.status, "skipped", "insufficient-memory tick should be a skip, not a failure")
+assert.equal(memGateTick.queueRun, null, "insufficient-memory tick must not start a queue run")
+const afterMemGateState = getDianxiaomiQueueDaemonState()
+assert.equal(afterMemGateState.status, "ACTIVE", "insufficient-memory defer must keep the daemon ACTIVE")
+assert.equal(afterMemGateState.consecutiveFailures, 0, "insufficient-memory defer must reset consecutiveFailures, not pause")
+assert.equal(getDianxiaomiProductWorkItem(memGateWorkItem.id)?.status, "ready-for-automation", "insufficient-memory defer must leave the ready item untouched for the next tick")
+pauseDianxiaomiQueueDaemon()
+if (previousMinFreeMemEnv === undefined) {
+  delete process.env.UNATTENDED_MIN_FREE_MEM_MB
+} else {
+  process.env.UNATTENDED_MIN_FREE_MEM_MB = previousMinFreeMemEnv
+}
+
 console.log("automation runner mode safety tests passed")

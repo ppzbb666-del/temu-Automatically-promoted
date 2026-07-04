@@ -83,7 +83,10 @@ export const defaultAutomationLaunchDraft = {
   mediaAutomationTools: defaultDailyMediaAutomationTools.join("\n"),
   submitAfterSave: true,
   submitMaxAttempts: "3",
-  headed: true
+  // OOM mitigation (layer 1, item ④): the default unattended launch runs
+  // headless. Operators can still enable headed in the advanced launch form for
+  // calibration/observation. See docs/oom-mitigation-plan.md.
+  headed: false
 }
 
 export type AutomationLaunchDraft = typeof defaultAutomationLaunchDraft
@@ -243,7 +246,7 @@ export const automationDraftFromInput = (input: AutomationDryRunStartInput = {})
   mediaAutomationTools: (input.mediaAutomationTools ?? []).join("\n"),
   submitAfterSave: input.submitAfterSave ?? defaultAutomationLaunchDraft.submitAfterSave,
   submitMaxAttempts: String(input.submitMaxAttempts ?? 3),
-  headed: input.headed ?? true
+  headed: input.headed ?? defaultAutomationLaunchDraft.headed
 })
 
 export const buildQueueProductScopeInput = (

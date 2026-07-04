@@ -8,6 +8,8 @@ import {
   averagePerProduct,
   getProfileLockStaleMs,
   getRealCalibrationStaleMs,
+  getUnattendedMaxSku,
+  getUnattendedMinFreeMemMb,
   allowDianxiaomiSmokeCalibration
 } from "../src/automation-runner-constants.ts"
 
@@ -86,7 +88,9 @@ const HOUR = 60 * MIN
   const saved = {
     lock: process.env.PROFILE_LOCK_STALE_MINUTES,
     calib: process.env.REAL_DIANXIAOMI_CALIBRATION_STALE_MINUTES,
-    smoke: process.env.ALLOW_DIANXIAOMI_SMOKE_URLS
+    smoke: process.env.ALLOW_DIANXIAOMI_SMOKE_URLS,
+    maxSku: process.env.UNATTENDED_MAX_SKU,
+    minMem: process.env.UNATTENDED_MIN_FREE_MEM_MB
   }
   const setEnv = (key: string, value: string | undefined) => {
     if (value === undefined) delete process.env[key]
@@ -116,10 +120,34 @@ const HOUR = 60 * MIN
     assert.equal(allowDianxiaomiSmokeCalibration(), true, "'true' → true")
     setEnv("ALLOW_DIANXIAOMI_SMOKE_URLS", "1")
     assert.equal(allowDianxiaomiSmokeCalibration(), false, "only exact 'true' enables it")
+
+    // OOM mitigation (layer 1): unattended SKU cap, minutes clamped to [1, 2000].
+    setEnv("UNATTENDED_MAX_SKU", undefined)
+    assert.equal(getUnattendedMaxSku(), 200, "unset → 200 default")
+    setEnv("UNATTENDED_MAX_SKU", "50")
+    assert.equal(getUnattendedMaxSku(), 50, "in-range value kept")
+    setEnv("UNATTENDED_MAX_SKU", "0")
+    assert.equal(getUnattendedMaxSku(), 1, "0 clamps up to 1")
+    setEnv("UNATTENDED_MAX_SKU", "999999")
+    assert.equal(getUnattendedMaxSku(), 2000, "huge value clamps to 2000")
+    setEnv("UNATTENDED_MAX_SKU", "not-a-number")
+    assert.equal(getUnattendedMaxSku(), 200, "non-numeric → default")
+
+    // OOM mitigation (layer 1): min free memory MB, clamped to [256, 131072].
+    setEnv("UNATTENDED_MIN_FREE_MEM_MB", undefined)
+    assert.equal(getUnattendedMinFreeMemMb(), 3072, "unset → 3072 default")
+    setEnv("UNATTENDED_MIN_FREE_MEM_MB", "4096")
+    assert.equal(getUnattendedMinFreeMemMb(), 4096, "in-range value kept")
+    setEnv("UNATTENDED_MIN_FREE_MEM_MB", "10")
+    assert.equal(getUnattendedMinFreeMemMb(), 256, "10 clamps up to 256")
+    setEnv("UNATTENDED_MIN_FREE_MEM_MB", "999999")
+    assert.equal(getUnattendedMinFreeMemMb(), 131072, "huge value clamps to 131072")
   } finally {
     setEnv("PROFILE_LOCK_STALE_MINUTES", saved.lock)
     setEnv("REAL_DIANXIAOMI_CALIBRATION_STALE_MINUTES", saved.calib)
     setEnv("ALLOW_DIANXIAOMI_SMOKE_URLS", saved.smoke)
+    setEnv("UNATTENDED_MAX_SKU", saved.maxSku)
+    setEnv("UNATTENDED_MIN_FREE_MEM_MB", saved.minMem)
   }
 
   console.log("PASS env-driven clamped getters")

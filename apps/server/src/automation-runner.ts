@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { freemem } from "node:os";
 import path from "node:path";
 import { createTaskFromDianxiaomiProductWorkItem, exportTaskFile, findTaskByDianxiaomiWorkItemId, getTaskFileExportSnapshotStatus, exportDianxiaomiRepairPreview, getSelectorConfigVersions, listSelectorDiagnosisReports, listDianxiaomiProductWorkItems, mergeDianxiaomiProductWorkItemSnapshot, persistPlannerState, recomputeDraftPricingIfStale, restoreSelectorConfigVersion, updateDianxiaomiProductWorkItemStatus, validateDianxiaomiAutomationPageUrl, validateSelectorConfig } from "./planner";
 import { startDianxiaomiImageCheck } from "./dianxiaomi-image-check-runner";
@@ -49,6 +50,8 @@ import {
     clampInteger,
     getProfileLockStaleMs,
     getRealCalibrationStaleMs,
+    getUnattendedMaxSku,
+    getUnattendedMinFreeMemMb,
     formatDurationCompact,
     parseTimestampMs,
     averagePerProduct
@@ -1912,7 +1915,12 @@ const queueDaemonSuccessfulCategories = new Set([
     "awaiting-flow-completion",
     "flow-outcome-recovered",
     "recovery-run-started",
-    "validation-rerun-started"
+    "validation-rerun-started",
+    // OOM mitigation (layer 1, item ③): deferring a tick because host free
+    // memory is below UNATTENDED_MIN_FREE_MEM_MB is a clean wait, not a failure.
+    // It must NOT count toward consecutiveFailures or the daemon would pause
+    // itself out of a transient low-memory window instead of retrying next tick.
+    "insufficient-memory"
 ]);
 const listQueueDaemonUnresolvedFlowJobs = (input: AutomationDryRunStartInput = {}) => {
     const scopedWorkItemIds = hasAutomationQueueScope(input)
@@ -4498,7 +4506,17 @@ export const startDianxiaomiQueueRun = (input: any = {}, options: Record<string,
     const pricingRefresh = refreshStalePricingForReadyWorkItems(input);
     const autoRetryReleasedIds = options.releasedAutoRetryIds
         ?? (options.releaseAutoRetry === false ? [] : releaseAutoRetryDianxiaomiWorkItems(input));
-    const readyItems = listScopedDianxiaomiProductWorkItems(input)
+    const flowJobIds = [];
+    const skippedItems = [];
+    // OOM mitigation (layer 1, item ②): candidate set for this run. We split the
+    // eligible ready items into a size-safe set and a set that exceeds
+    // UNATTENDED_MAX_SKU. The over-cap items are recorded as skipped with a
+    // `sku-count-over-cap` reason and never spawn a full-flow — large variant
+    // grids are what OOM the browser during fill-stage variant-remap. This reads
+    // ONLY the stored snapshot.skuCount; it never opens a page to probe (dry-run
+    // also triggers variant-remap). See docs/oom-mitigation-plan.md.
+    const unattendedMaxSku = getUnattendedMaxSku();
+    const eligibleReadyItems = listScopedDianxiaomiProductWorkItems(input)
         .filter((item) =>
             item.status === "ready-for-automation"
             // P0-B: skip items that already completed a successful Dianxiaomi submit.
@@ -4509,10 +4527,19 @@ export const startDianxiaomiQueueRun = (input: any = {}, options: Record<string,
             // This blocks concurrent queue-run / recovery-run / manual-trial
             // triggers from picking the same item twice.
             && !inFlightWorkItemIds.has(item.id)
-        )
+        );
+    const readyItems = eligibleReadyItems
+        .filter((item) => (item.snapshot?.skuCount ?? 0) <= unattendedMaxSku)
         .slice(0, limit);
-    const flowJobIds = [];
-    const skippedItems = [];
+    for (const overCapItem of eligibleReadyItems.filter((item) => (item.snapshot?.skuCount ?? 0) > unattendedMaxSku).slice(0, limit)) {
+        const skuCount = overCapItem.snapshot?.skuCount ?? 0;
+        const reason = `sku-count-over-cap: ${skuCount} SKU exceeds UNATTENDED_MAX_SKU ${unattendedMaxSku}; skipped to avoid variant-remap OOM`;
+        skippedItems.push({
+            workItemId: overCapItem.id,
+            reason
+        });
+        updateDianxiaomiProductWorkItemStatus(overCapItem.id, "blocked", `automation queue skipped: ${reason}`, classifyDianxiaomiWorkFailure(reason, "queue-daemon"));
+    }
     const { limit: _limit, ...flowInput } = input;
     for (const workItem of readyItems) {
         const pageUrlValidation = validateDianxiaomiAutomationPageUrl(workItem.pageUrl);
@@ -4573,7 +4600,13 @@ export const startDianxiaomiQueueRun = (input: any = {}, options: Record<string,
                 url: input.url ?? workItem.pageUrl,
                 taskFile: taskExport.taskFile,
                 repairPlanFile: input.repairPlanFile ?? repairExport?.repairPlanFile,
-                mediaAutomationMode: input.mediaAutomationMode ?? "unattended-apply"
+                mediaAutomationMode: input.mediaAutomationMode ?? "unattended-apply",
+                // OOM mitigation (layer 1, item ④): the unattended queue/daemon
+                // path runs headless by default — headed rendering adds compositor
+                // memory and lets an operator accidentally close the window.
+                // Calibration/manual endpoints keep headed; a manual queue-run can
+                // still opt in by passing headed:true explicitly.
+                headed: input.headed ?? false
             }, {
                 workItemId: workItem.id,
                 taskId,
@@ -5975,6 +6008,52 @@ export const tickDianxiaomiQueueDaemon = async () => {
                 consecutiveFailures: 0,
                 lastFinishedAt: finishedAt,
                 lastRecoveryRunId: recoveryRun.id,
+                lastError: null
+            };
+            pushQueueDaemonTick(tick);
+            scheduleQueueDaemonNextRun();
+            return tick;
+        }
+        // OOM mitigation (layer 1, item ③): before spawning a full-flow, check
+        // host free memory. If it is below UNATTENDED_MIN_FREE_MEM_MB and there is
+        // size-eligible ready work that would spawn a browser, defer this tick as
+        // a clean wait (category insufficient-memory ∈ queueDaemonSuccessfulCategories,
+        // so it does NOT count as a failure). This turns a mid-run OOM crash into
+        // a bounded retry next tick. Only defers when spawnable work exists so an
+        // idle daemon on a low-memory host still reports idle-no-items, not this.
+        const unattendedMaxSku = getUnattendedMaxSku();
+        const hasSpawnableReadyWork = listScopedDianxiaomiProductWorkItems(daemonStateHolder.current.input).some((item) =>
+            item.status === "ready-for-automation"
+            && item.publishOutcome?.route !== "published"
+            && !inFlightWorkItemIds.has(item.id)
+            && (item.snapshot?.skuCount ?? 0) <= unattendedMaxSku
+        );
+        const freeMemMb = Math.floor(freemem() / (1024 * 1024));
+        const minFreeMemMb = getUnattendedMinFreeMemMb();
+        if (hasSpawnableReadyWork && freeMemMb < minFreeMemMb) {
+            const finishedAt = new Date().toISOString();
+            const flowOutcomeReason = flowOutcomes.length > 0 ? summarizeQueueDaemonFlowOutcomes(flowOutcomes) : null;
+            const reason = [
+                `deferred: host free memory ${freeMemMb} MB is below UNATTENDED_MIN_FREE_MEM_MB ${minFreeMemMb}; waiting for memory before spawning a full-flow`,
+                flowOutcomeReason
+            ].filter(Boolean).join("; ");
+            const tick = {
+                id,
+                startedAt,
+                finishedAt,
+                status: "skipped",
+                category: "insufficient-memory",
+                reason,
+                queueRun: null,
+                recoveryRun: null,
+                flowOutcomes,
+                error: null
+            };
+            daemonStateHolder.current = {
+                ...daemonStateHolder.current,
+                running: false,
+                consecutiveFailures: 0,
+                lastFinishedAt: finishedAt,
                 lastError: null
             };
             pushQueueDaemonTick(tick);
