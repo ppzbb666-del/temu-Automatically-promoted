@@ -147,6 +147,7 @@ type MediaFailureKind =
   | "apply-control-missing"
   | "return-blocked"
   | "image-unchanged"
+  | "broken-source-images"
   | "unknown"
 
 type MediaToolSafetyItem = {
@@ -768,6 +769,18 @@ const fetchDianxiaomiProductCategorySnapshot = async (page: Page) => {
 // previewImgUrls is a "|"-joined URL list), and materialImgUrl is a fallback.
 // Returns a flat, deduped URL list — fillSkuImageLinks handles 3:4 conversion
 // (via weserv) and reuse-to-3, so a flat list is enough to clear the save gate.
+//
+// TODO(broken-source-images / carousel re-upload): some page-reference products
+// (e.g. 161406453047896984 / 896128 / 896488) have DELETED carousel copies — the
+// per-color previewImgUrls / extraImages point at wxalbum-*.dianxiaomi.com URLs
+// that now 404, so the carousel images render 0×0 and no batch-resize can make
+// them 1:1 (submit rejects 轮播图必须1:1; classified broken-source-images). BUT the
+// ORIGINAL 1688 source images (cbu01.alicdn.com, from materialImgUrl / the
+// collected product sourceUrl) are still HEALTHY. Per the Full-Automation charter,
+// the unblock path should be automated: when the carousel URLs are dead, re-pull
+// the images from the 1688 source (collected product sourceUrl / alicdn URLs) and
+// re-upload them into the carousel (选择图片 → 网络图片 / 引用采集图片), then batch-resize
+// 1:1. This is the actual fix for this whole page-reference batch, not just cleanup.
 const fetchProductImagesFromEditJson = async (page: Page): Promise<string[]> => {
   const productId = (() => {
     try {
@@ -12523,6 +12536,46 @@ const prepareBatchResizeDialog = async (
   await fillTextField(valueInput, String(targetSidePx))
   const selectAllChecked = await ensureCheckboxNearText(dialog, "选择全部", true)
   const actualValue = await valueInput.inputValue().catch(() => "")
+  // Broken-source-images guard: the batch-resize dialog lists the carousel images
+  // as selectable rows. When the product's source images are broken (0×0 — the
+  // wxalbum proxy URLs return no data), the dialog has NO selectable image and
+  // 选择全部 selects nothing, so apply returns 请选择要更改尺寸的图片 and no ratio
+  // fix is possible. Detect it here (dialog image count) and, cross-checked
+  // against the page's carousel img natural dimensions, mark the tool as blocked
+  // by broken source images so the product is isolated instead of retried.
+  const dialogImageCount = await dialog.locator("img").count().catch(() => 0)
+  const selectableRowCount = await dialog.locator(".ant-checkbox-wrapper, [class*='item' i]").filter({
+    has: dialog.locator("img")
+  }).count().catch(() => 0)
+  let brokenSourceImages = false
+  if (dialogImageCount === 0 || selectableRowCount === 0) {
+    // Cross-check on the listing page: are the carousel images actually 0×0?
+    const carouselImageStats = await dialog.page().evaluate(() => {
+      const root = document.querySelector(".img-module") ?? document.body
+      const imgs = Array.from(root.querySelectorAll("img")).slice(0, 20) as HTMLImageElement[]
+      const carousel = imgs.filter((im) => !/material-img/i.test((im.closest("[class*='module' i]") as HTMLElement | null)?.className ?? ""))
+      const considered = (carousel.length > 0 ? carousel : imgs)
+      const broken = considered.filter((im) => im.complete && im.naturalWidth === 0 && im.naturalHeight === 0)
+      return { total: considered.length, broken: broken.length }
+    }).catch(() => ({ total: 0, broken: 0 }))
+    brokenSourceImages = carouselImageStats.total > 0 && carouselImageStats.broken === carouselImageStats.total
+    tool.preparation = {
+      prepared: false,
+      reason: brokenSourceImages
+        ? `broken-source-images: batch resize dialog has no selectable image and all ${carouselImageStats.total} carousel images are 0×0 (broken source images, need re-upload)`
+        : "batch resize dialog has no selectable image",
+      brokenSourceImages,
+      dialogImageCount,
+      selectableRowCount,
+      carouselImageStats,
+      selectedResizeMode,
+      selectedResizeSide,
+      selectedRatio,
+      squareModeApplied,
+      selectAllChecked
+    }
+    return false
+  }
   tool.preparation = {
     prepared: actualValue === String(targetSidePx),
     targetSidePx,
@@ -14007,14 +14060,23 @@ const applyUnattendedMediaTools = async (
       }
 
       if (tool.id === "batch-resize" && tool.preparation?.prepared !== true) {
-        const failure = classifyMediaFailure("batch resize preparation failed", "missing-input")
+        // Surface the broken-source-images reason (from prepareBatchResizeDialog)
+        // so the server classifier can isolate the product instead of retrying —
+        // no ratio tool can fix 0×0 source images.
+        const brokenSource = tool.preparation?.brokenSourceImages === true
+        const prepReason = typeof tool.preparation?.reason === "string" ? tool.preparation.reason : ""
+        const failure = brokenSource
+          ? { failureKind: "broken-source-images" as MediaFailureKind, retryable: false }
+          : classifyMediaFailure("batch resize preparation failed", "missing-input")
         tool.applied = false
         tool.status = "apply-failed"
-        tool.reason = `${tool.label} dialog opened, but required resize inputs could not be prepared`
+        tool.reason = brokenSource
+          ? `${tool.label}: ${prepReason}`
+          : `${tool.label} dialog opened, but required resize inputs could not be prepared`
         tool.beforeApplyScreenshotPath = await captureMediaScreenshot(page, options.screenshotDir, "media-prepare-failed", tool.id)
         tool.failureKind = failure.failureKind
         tool.retryable = failure.retryable
-        tool.error = "batch resize preparation failed"
+        tool.error = brokenSource ? prepReason : "batch resize preparation failed"
         await closeMediaSurfaceStackToBaseline(page, tool.beforeDialogCount ?? 0, config, tool)
         await page.waitForTimeout(500)
         tool.returnDialogCount = (await getPageSafetyState(page)).visibleDialogCount

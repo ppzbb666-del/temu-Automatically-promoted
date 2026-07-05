@@ -28,6 +28,10 @@ const cases: Array<{
   // contains "oom"; it must classify as sku-count-over-cap (checked first), NOT
   // fall through to the browser-crash auto-retry branch.
   { name: "sku count over cap", reason: "sku-count-over-cap: 322 SKU exceeds UNATTENDED_MAX_SKU 200; skipped to avoid variant-remap OOM", category: "sku-count-over-cap", retryable: false, autoRetry: false },
+  // Broken source images: 0×0 carousel images can never be resized to 1:1. The
+  // reason contains "batch resize" / 图片 tokens, so it must be caught BEFORE the
+  // media-processing branch and must NOT be retryable/auto-retryable.
+  { name: "broken source images", reason: "Batch resize: broken-source-images: batch resize dialog has no selectable image and all 5 carousel images are 0×0 (broken source images, need re-upload)", category: "broken-source-images", retryable: false, autoRetry: false },
   { name: "task file", reason: "could not export automation task", category: "task-file", retryable: true, autoRetry: true },
   { name: "media processing", reason: "media processing failed during batch resize", category: "media-processing", retryable: false, autoRetry: false },
   // Temu carousel aspect-ratio rejection at submit → media-processing, and

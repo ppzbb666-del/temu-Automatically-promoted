@@ -496,6 +496,8 @@ const dianxiaomiProductWorkItemSchema = z.object({
       "target-surface",
       "task-file",
       "browser-profile",
+      "sku-count-over-cap",
+      "broken-source-images",
       "unknown"
     ]),
     retryable: z.boolean(),

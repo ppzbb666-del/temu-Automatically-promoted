@@ -28,6 +28,22 @@ export const classifyDianxiaomiWorkFailure = (reason, source = "queue-daemon"): 
             nextAction: "This product's SKU count exceeds the unattended cap (UNATTENDED_MAX_SKU). Reduce the variant grid, run it on a higher-memory host, or raise the cap explicitly before retrying."
         };
     }
+    // Broken source images: the product's carousel images are 0×0 (the source
+    // image URLs return no data), so no ratio/media tool can make them 1:1 and the
+    // batch-resize dialog has no selectable image. This is source-data corruption,
+    // NOT a transient media failure — auto-retrying wastes the daemon failure
+    // budget on a product that can never pass until its images are re-uploaded.
+    // Checked before the media-processing branch (its reason contains 图片/batch
+    // resize tokens) so it does not fall through to a retryable media failure.
+    if (includesAny(["broken-source-images", "broken source images", "carousel images are 0×0", "carousel images are 0x0"])) {
+        return {
+            ...base,
+            category: "broken-source-images",
+            retryable: false,
+            autoRetryRecommended: false,
+            nextAction: "需重新上传源图：This product's carousel/source images are broken (0×0, the source image URLs return no data). No image tool can resize a 0×0 image. Re-upload valid product images (e.g. re-pull from the 1688 source URL) before this product can be listed."
+        };
+    }
     if (includesAny(["login", "captcha", "verify", "verification", "楠岃瘉鐮?", "验证码", "登录", "鐧诲綍"])) {
         return {
             ...base,

@@ -72,6 +72,7 @@ export type DianxiaomiWorkFailureCategory =
   | "task-file"
   | "browser-profile"
   | "sku-count-over-cap"
+  | "broken-source-images"
   | "unknown"
 
 export type DianxiaomiWorkFailureDiagnosis = {
