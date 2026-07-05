@@ -9908,10 +9908,21 @@ const finalizeImageTranslationResultIfPresent = async (page: Page) => {
   return handled
 }
 
-const findImageOptionsTrigger = async (page: Page) =>
+export const findImageOptionsTrigger = async (page: Page) =>
   await firstCompactInteractiveVisible([
-    page.locator(".img-module .img-options-action-btn.ant-dropdown-trigger"),
+    // The carousel toolbar has multiple .img-options-action-btn.ant-dropdown-trigger
+    // elements that share the SAME class (添加水印 / crop 编辑图片). The media tools
+    // (批量改图片尺寸 / 图片翻译 / 批量编辑 …) live only under the 编辑图片 / crop one,
+    // so every candidate MUST filter by that text — an unfiltered .img-module
+    // .img-options-action-btn.ant-dropdown-trigger grabs 添加水印 first, whose menu
+    // has none of the tools (this is why batch-resize/image-translation showed
+    // missing-tool while the entry was clearly present). Verified via
+    // probe-media-tool-discovery.
+    page.locator(".img-module .img-options-action-btn.ant-dropdown-trigger").filter({ hasText: /编辑图片|批量|crop/i }),
     page.locator(".img-module [class*='dropdown-trigger' i]").filter({ hasText: /编辑图片|批量|crop/i }),
+    // Probe-verified loose fallbacks, scoped to .img-module (not global): the real
+    // trigger is an <a> and sometimes a wrapping div with cursor:pointer.
+    page.locator(".img-module a, .img-module button, .img-module [role='button'], .img-module .ant-dropdown-trigger").filter({ hasText: /编辑图片|crop/i }),
     page.locator(".img-options-action-btn").filter({ hasText: /编辑图片|批量|crop/i })
   ])
   ?? await findInteractiveByKeywords(page, IMAGE_OPTIONS_TRIGGER_KEYWORDS)
@@ -9975,7 +9986,7 @@ const describeLocator = async (locator: Locator | null): Promise<LocatorDescript
   })).catch(() => null)
 }
 
-const collectMediaToolCandidates = async (
+export const collectMediaToolCandidates = async (
   page: Page,
   config: DianxiaomiSelectorConfig = {}
 ): Promise<MediaToolCandidate[]> => {
@@ -14012,11 +14023,13 @@ const applyUnattendedMediaTools = async (
       }
 
       const mediaSurface = await getLatestMediaDialog(page)
-      // The 批量编辑 (image editor) dialog requires images to be selected before
-      // the 确定 apply button does anything; clicking apply with 已选中：0 returns
-      // "请选择要编辑的图片". batch-resize handles this inside prepareBatchResizeDialog,
-      // so only the image-editor dialog path needs the explicit 选择全部 tick here.
-      if (tool.id === "image-editor" && mediaSurface) {
+      // Both the 批量编辑 (image editor) and 批量改图片尺寸 (batch resize) dialogs
+      // require images to be selected before their apply button does anything —
+      // apply with 已选中：0 returns "请选择要编辑的图片" / "请选择要更改尺寸的图片".
+      // batch-resize ticks 选择全部 inside prepareBatchResizeDialog, but the
+      // 自定义比例调整 → 1:1 mode switch re-renders the dialog and can clear that
+      // tick, so re-assert 选择全部 immediately before apply for both tools.
+      if ((tool.id === "image-editor" || tool.id === "batch-resize") && mediaSurface) {
         tool.selectAllChecked = await ensureCheckboxNearText(mediaSurface, "选择全部", true)
       }
       const applyButton = await findMediaApplyButtonForTool(page, config, tool)
