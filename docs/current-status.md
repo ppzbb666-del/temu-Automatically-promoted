@@ -626,3 +626,26 @@ Next, continue hardening the unattended publish success/failure loop: add route-
 - **探针（只读/只修，保留复验用）**：[probe-carousel-network-image.ts](../apps/automation/src/probes/probe-carousel-network-image.ts)（dump 网络图片弹窗）、[probe-carousel-tile-delete.ts](../apps/automation/src/probes/probe-carousel-tile-delete.ts)（dump tile 删除结构）、[probe-carousel-repull.ts](../apps/automation/src/probes/probe-carousel-repull.ts)（调生产 re-pull 验证轮播图变健康，改草稿不保存不提交）。
 - **验证**：`npm run typecheck`（automation + server）全绿；`npm test --workspace @temu-ai-ops/server` 全过。
 - **未做（下轮）**：完整 daemon full-flow 把 re-pull 后的草稿 save「产品编辑成功」+ submit「产品已提交发布」跑出第一个"新商品全链全自动"绿样本——机制已就位，剩的是把它挂进一次真实 full-flow 跑通（会写盘保存）。
+
+### 首个 re-pull full-flow 样本：save✓ / submit 到 Temu 被数据规则拒（2026/07/06）
+
+承接 [carousel-repull-automation-verified]。把 re-pull 机制挂进真实 daemon full-flow，跑第一个"账号扫描新商品→提交核价"零人工样本。目标商品 896984（加绒法兰绒宠物四脚衣，`dxm-work-1783119150713-78al7t`）。
+
+**跑通前先清了两道环境/代码障碍：**
+- **校准过期**（硬门）：real-dianxiaomi calibration 3.1d 旧（max 24h），daemon start 直接 PAUSED。用 `npm run real-calibration -- --url=<896984> --headed=false` 在真机重采（surface=real-dianxiaomi/done，fields+save+submit ok），健康门从 block 降到 warning。
+- **内存**：空闲仅 1.46GB（<3GB `UNATTENDED_MIN_FREE_MEM_MB` 门）。关掉 QQLive/douyin/Edge/微信后 4.66GB。
+- **itemUrls 作用域 bug（commit f1f2172）**：`normalizeAutomationScopeUrl` 非幂等——归一化后的 `dxm:/path?id=..` 二次归一化变成 `dxm:///path?id=..`（`new URL` 把 `dxm:` 当 scheme 解析）。daemon 启动时归一化 itemUrls、选品时又归一化一次 → 作用域内 ready 数变 0，daemon 空转永不 spawn。修：canonical `dxm:` key 原样返回。修后 scoped health `total:1 ready:1`，daemon 正常 `ready-queued | queued 1 full-flow job`。因服务器是无 watch 模式（省内存），改 shared 后**重启了服务进程**才生效。
+
+**full-flow 结果（两跑）：**
+- 第 1 跑：dry-run✓ → fill✓（尺码表自动填、fill-sku-image-links skip）→ **save✓「您的产品编辑成功！」**（re-pull 已在 fill 内跑过并持久化，轮播图 3×800×800/1:1）→ submit✗。submit-pass 的 media 重跑把 batch-resize 判成 `surface-mismatch`。
+- 定位到 **batch-resize false-negative（commit f1f2172）**：`prepareBatchResizeDialog` 里 `selectableRowCount===0` 就判「no selectable image」，但该 DOM 启发式在图片处于「已选中/点击取消 800×800」态时返回 0——健康的 3×800×800 被误杀（截图证明弹窗完全正常：自定义比例调整/1:1/选择全部/3 图全绿勾）。改：只在 `dialogImageCount===0` 或自然尺寸 cross-check 确认全 0×0 时才 bail。
+- 第 2 跑（修后）：dry-run✓ fill✓ **save✓** → media-processing-plan **done✓**（batch-resize **applied✓ prepared:true**）→ submit **被店小秘接受、到达 Temu publish**，Temu 用业务规则拒：**「接口报错：材积重量大于实际重量，无法录入，请调整体积或者重量」**。分类 `publish-validation`（retryable=true, autoRetry=false），商品干净置 blocked，daemon `consecutiveFailures` 保持 0（ready-queued tick 不计失败）。
+
+**结论**：轮播图 1:1 / broken-source-images 这堵墙**已彻底清掉并端到端验证**——re-pull→1:1→尺码表→save→submit-accepted→Temu-publish 全链跑通。**第一个绿 submit 样本仍差最后一步**，卡点换成**物流重量数据**（材积重量>实际重量），是占位 work item 的体积/重量数值问题，不是机制。artifact：`.runtime/automation-artifacts/automation-full-flow-2026-07-06T21-09-05-409Z/`（submit report `dianxiaomi-run-2026-07-06T21-21-41-586Z.json` 带原始拒因）。
+- vm10ja（棉花娃娃）、lnknhg（Women Lingerie）：轮播图同样 404，re-pull 机制对它们同样适用，但按"成功后再放"原则**暂不放行**，保持 blocked 等第一个绿样本。
+
+**下一步优先级（更新）：**
+1. **[P0] 修材积重量>实际重量**：让占位 work item 带合规的体积/重量（或 fill 阶段规范化 material 重量/体积），拿到第一个 Temu publish 绿样本。这是现在唯一挡在"全链全自动"前的墙。
+2. **[P1] 62-SKU OOM 重验**：layer-2 单会话方案（fill→save context-handoff 崩溃）。
+3. **[P2] LLM 品类映射兜底 TODO**（ladder-L3，`KNOWN_CATEGORY_RECOVERY_PATHS` 硬编码之后）。
+4. **[P2] 批量扩池**：绿样本拿到后，把 re-pull + 重量修复推广到 vm10ja/lnknhg 及更大账号池。
