@@ -12761,10 +12761,16 @@ const prepareBatchResizeDialog = async (
   const selectableRowCount = await dialog.locator(".ant-checkbox-wrapper, [class*='item' i]").filter({
     has: dialog.locator("img")
   }).count().catch(() => 0)
-  let brokenSourceImages = false
-  if (dialogImageCount === 0 || selectableRowCount === 0) {
-    // Cross-check on the listing page: are the carousel images actually 0×0?
-    const carouselImageStats = await dialog.page().evaluate(() => {
+  // Cross-check on the listing page whether the carousel images are actually 0×0.
+  // This natural-dimension check is the RELIABLE signal for broken source images;
+  // selectableRowCount is a fragile DOM heuristic that returns 0 when the dialog
+  // renders images in the already-selected ("点击取消 800×800") state even though
+  // real, selectable images are present. So we only treat the dialog as unusable
+  // when it has zero <img> at all, OR the natural-dimension cross-check confirms
+  // every carousel image is broken. A healthy dialog with selectableRowCount===0
+  // (images present + selected, 选择全部 checked) must NOT be failed here.
+  const carouselImageStats = (dialogImageCount === 0 || selectableRowCount === 0)
+    ? await dialog.page().evaluate(() => {
       const root = document.querySelector(".img-module") ?? document.body
       const imgs = Array.from(root.querySelectorAll("img")).slice(0, 20) as HTMLImageElement[]
       const carousel = imgs.filter((im) => !/material-img/i.test((im.closest("[class*='module' i]") as HTMLElement | null)?.className ?? ""))
@@ -12772,7 +12778,12 @@ const prepareBatchResizeDialog = async (
       const broken = considered.filter((im) => im.complete && im.naturalWidth === 0 && im.naturalHeight === 0)
       return { total: considered.length, broken: broken.length }
     }).catch(() => ({ total: 0, broken: 0 }))
-    brokenSourceImages = carouselImageStats.total > 0 && carouselImageStats.broken === carouselImageStats.total
+    : { total: dialogImageCount, broken: 0 }
+  const brokenSourceImages = carouselImageStats.total > 0 && carouselImageStats.broken === carouselImageStats.total
+  // Only bail out when there is genuinely nothing to resize: no <img> in the dialog,
+  // or all carousel images are provably broken 0×0. selectableRowCount alone (with
+  // images present and not broken) is a false negative and must not fail the tool.
+  if (dialogImageCount === 0 || brokenSourceImages) {
     tool.preparation = {
       prepared: false,
       reason: brokenSourceImages

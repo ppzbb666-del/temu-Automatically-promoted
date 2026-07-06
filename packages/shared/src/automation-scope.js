@@ -25,6 +25,13 @@ export const normalizeAutomationScopeUrl = (value) => {
     if (!trimmed) {
         return null;
     }
+    // Idempotency guard: an already-normalized Dianxiaomi scope key is `dxm:<path>?id=<id>`.
+    // Re-parsing it through `new URL()` yields `dxm:///<path>...` which no longer matches
+    // the original key, silently dropping the scoped work item on a second normalization
+    // pass (e.g. queue-daemon input normalized on start, then again during selection).
+    if (trimmed.startsWith("dxm:") && !trimmed.startsWith("dxm://")) {
+        return trimmed;
+    }
     try {
         const url = new URL(trimmed);
         const host = url.hostname.toLowerCase();
