@@ -2793,15 +2793,44 @@ export const normalizeShippingWarehouse = async (page: Page, config: DianxiaomiS
     )
   }
 
-  // Already correct? (only the target selected)
+  // Backfill every empty stock cell (库存不能为空). The warehouse column may already
+  // be bound to the target yet still show empty "<warehouse>库存" inputs — so this
+  // runs on BOTH the already-bound and just-switched paths. Value reused from an
+  // existing filled stock input (the account's own number) when available, else a
+  // safe non-zero default. Fully generic.
+  const backfillEmptyStock = () =>
+    page.evaluate(() => {
+      const inputs = Array.from(document.querySelectorAll("input[name='stock']")) as HTMLInputElement[]
+      const existing = inputs.map((i) => parseInt(i.value, 10)).filter((n) => Number.isFinite(n) && n > 0)
+      const fillValue = String(existing.length > 0 ? Math.max(...existing) : 100)
+      const setNativeValue = (el: HTMLInputElement, value: string) => {
+        const proto = Object.getPrototypeOf(el)
+        const desc = Object.getOwnPropertyDescriptor(proto, "value")
+        desc?.set?.call(el, value)
+        el.dispatchEvent(new Event("input", { bubbles: true }))
+        el.dispatchEvent(new Event("change", { bubbles: true }))
+      }
+      let n = 0
+      for (const input of inputs) {
+        if (!input.value || input.value.trim() === "" || parseInt(input.value, 10) === 0) {
+          setNativeValue(input, fillValue)
+          n += 1
+        }
+      }
+      return n
+    }).catch(() => 0)
+
+  // Already correct? (only the target selected) — still backfill empty stock.
   const matchesTarget = (label: string) => label === target || label.startsWith(target) || label.includes(target)
   if (before.selected.length === 1 && matchesTarget(before.selected[0])) {
+    const stockFilled = await backfillEmptyStock()
+    await page.waitForTimeout(300)
     return stepResult(
       "normalize-shipping-warehouse",
       "Normalize shipping warehouse",
-      "skipped",
-      `Shipping warehouse already bound to ${before.selected[0]}`,
-      { target, selected: before.selected }
+      "done",
+      `Shipping warehouse already bound to ${before.selected[0]}${stockFilled > 0 ? `; backfilled ${stockFilled} empty stock cell(s)` : ""}`,
+      { target, selected: before.selected, stockFilled }
     )
   }
 
@@ -2854,14 +2883,24 @@ export const normalizeShippingWarehouse = async (page: Page, config: DianxiaomiS
   await page.waitForTimeout(500)
   const after = await readState()
   const clean = after.selected.length === 1 && matchesTarget(after.selected[0])
+
+  // Switching the warehouse swaps the SKU stock column to "<warehouse>库存", whose
+  // per-row inputs come up EMPTY — Dianxiaomi then rejects submit with 库存不能为空.
+  // So after a successful switch, backfill every empty stock cell.
+  let stockFilled = 0
+  if (clean) {
+    stockFilled = await backfillEmptyStock()
+    await page.waitForTimeout(400)
+  }
+
   return stepResult(
     "normalize-shipping-warehouse",
     "Normalize shipping warehouse",
     clean ? "done" : "failed",
     clean
-      ? `Shipping warehouse bound to ${after.selected[0]} (was ${JSON.stringify(before.selected)})`
+      ? `Shipping warehouse bound to ${after.selected[0]} (was ${JSON.stringify(before.selected)})${stockFilled > 0 ? `; backfilled ${stockFilled} empty stock cell(s)` : ""}`
       : `After normalization the selection is ${JSON.stringify(after.selected)}, expected only ${target}`,
-    { target, before: before.selected, after: after.selected }
+    { target, before: before.selected, after: after.selected, stockFilled }
   )
 }
 
