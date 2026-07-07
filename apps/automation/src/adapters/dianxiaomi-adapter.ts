@@ -2596,7 +2596,8 @@ const choiceLooksDisabled = (state: Awaited<ReturnType<typeof readChoiceLikeStat
     || /(disabled|forbidden)/i.test(state.className)
 }
 
-const normalizeShipmentPromise = async (page: Page) => {
+// Exported for the shipment-promise verification probe (calls production fn).
+export const normalizeShipmentPromise = async (page: Page) => {
   const promiseRows = page.locator(".shipment-wrapper .ant-form-item").filter({
     hasText: new RegExp(escapeRegExp(SHIPMENT_PROMISE_LABEL_TEXT), "i")
   })
@@ -2659,23 +2660,31 @@ const normalizeShipmentPromise = async (page: Page) => {
   }
 
   const candidateTexts = optionCandidates.map((candidate) => candidate.text)
+  // Prefer the LONGEST fulfillment window (e.g. 9个工作日内发货). For 半托管 the
+  // longest promise is the safest generic default — it minimizes late-shipment
+  // risk and is universally valid, whereas the aggressive 1个工作日 default the
+  // page pre-checks is easy to miss. Preference order = longest → shortest.
+  const promisePreference = [...SHIPMENT_PROMISE_OPTION_TEXTS].reverse()
+  const target = promisePreference
+    .map((optionText) => optionCandidates.find((candidate) => candidate.optionText === optionText) ?? null)
+    .find(Boolean) ?? null
+
   const selectedCandidate = optionCandidates.find((candidate) => candidate.checked)
-  if (selectedCandidate) {
+  // Skip only when the CURRENT selection already equals the preferred target.
+  // If a shorter/more-aggressive window is pre-checked (e.g. 1个工作日), re-select
+  // the longer target instead of skipping.
+  if (selectedCandidate && target && selectedCandidate.optionText === target.optionText) {
     return stepResult(
       "normalize-shipment-promise",
       "Normalize shipment promise",
       "skipped",
-      `Shipment promise is already set: ${selectedCandidate.optionText}`,
+      `Shipment promise is already set to the preferred window: ${selectedCandidate.optionText}`,
       {
         selectedText: selectedCandidate.optionText,
         candidateTexts
       }
     )
   }
-
-  const target = SHIPMENT_PROMISE_OPTION_TEXTS
-    .map((optionText) => optionCandidates.find((candidate) => candidate.optionText === optionText) ?? null)
-    .find(Boolean) ?? null
 
   if (!target) {
     return stepResult(
@@ -2701,10 +2710,11 @@ const normalizeShipmentPromise = async (page: Page) => {
     "Normalize shipment promise",
     "done",
     verifiedSelected
-      ? `Shipment promise set to ${target.optionText}`
+      ? `Shipment promise set to ${target.optionText}${selectedCandidate ? ` (was ${selectedCandidate.optionText})` : ""}`
       : `Clicked shipment promise option ${target.optionText}`,
     {
       selectedText: target.optionText,
+      previousText: selectedCandidate?.optionText ?? null,
       verifiedSelected,
       candidateTexts
     }
