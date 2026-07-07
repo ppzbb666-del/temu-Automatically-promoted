@@ -649,3 +649,24 @@ Next, continue hardening the unattended publish success/failure loop: add route-
 2. **[P1] 62-SKU OOM 重验**：layer-2 单会话方案（fill→save context-handoff 崩溃）。
 3. **[P2] LLM 品类映射兜底 TODO**（ladder-L3，`KNOWN_CATEGORY_RECOVERY_PATHS` 硬编码之后）。
 4. **[P2] 批量扩池**：绿样本拿到后，把 re-pull + 重量修复推广到 vm10ja/lnknhg 及更大账号池。
+
+### 🎉 首个（及第二个）「账号扫描新商品→提交核价」全链零人工绿样本（2026/07/07）
+
+承接材积重量修复那一轮。把 submit 剩下的墙逐个按 Full-Automation 阶梯做成通用机制，最终 **896984 + 896488 两个商品全自动 submit「产品已提交发布 / publishSuccess」**——第一个真正的全链零人工绿样本。
+
+**本轮修的四道墙（都真机验证 + commit）：**
+- **材积重量 > 实际重量**（commit `ac43f46`，上一轮）：`normalize-sku-logistics` cube-root 缩体积保重量。
+- **承诺发货时效**（commit `bcb7b3b`）：`normalizeShipmentPromise` 原本预选第一项（1个工作日）且已勾就跳过 → 改成**优选最长档 9个工作日内发货**（半托管安全默认），即使已勾更激进档也重选。真机 1日→9日。
+- **发货仓 LV2600（其他）不被 Temu 支持**（commit `334314e`）：`选择仓库` 是 **antd-Vue 多选控件**，Playwright 的 click/键盘/force/坐标点全打不开——**只认原生 `mousedown` 事件**。`normalizeShippingWarehouse` 用 dispatch MouseEvent 打开面板、选 `config.shippingWarehouse`（账号特定，加进 `DianxiaomiSelectorConfig`，本账号设 LIVELY）、反选其余仓，只留目标仓。未配置则跳过（不碰别的账号）。真机 LV2600→LIVELY。
+- **库存不能为空**（commit `3df2e0d`）：切仓后库存列换成 `<仓>库存`、各行变空 → Dianxiaomi 报「产品信息中有错误 / 库存不能为空」。切仓成功后回填所有空 `input[name=stock]`（复用页面已有库存值，否则安全默认 100），已绑目标仓+空库存的情况也回填。真机 8 空→0 空。
+
+**绿样本证据：**
+- **896984**（宠物绒衣）：`publishOutcome.succeeded / route:published`，dxmState **offline/publishFail → online/publishSuccess**（poll 7 次确认），submit「产品已提交发布」。item → `edited`。artifact `automation-full-flow-2026-07-07T04-39-30-523Z`。
+- **896488**（棉花娃娃，**62-SKU**）：同样 submit「产品已提交发布」/succeeded，item → `edited`。**注意：62-SKU 这次 fill+save+submit 全程跑通没 OOM 崩**（全程 free mem ~3.2–3.5GB 稳住），此前 62-SKU 是 fill→save 崩溃高危区——本次未复现。artifact `automation-full-flow-2026-07-07T04-53-26-692Z`。
+- **896128**（Women Lingerie）：❌ blocked，`fill-draft failed: 1`——**size-chart 点击超时**（`.skuAttrSizeChart .link` click Timeout 15s），崩在 `normalizeSizeChart`，**没到 shipping 步骤**，与本轮 shipping/重量修复无关。8-SKU 非 OOM。按分类干净停在 blocked，未反复重试。
+
+**下一步优先级（更新）：**
+1. **[P0] 女装/内衣类 size-chart 点击超时**：`.skuAttrSizeChart .link` 在某些品类点不动（896128 lingerie 崩这里）。查该品类 size-chart 触发器结构差异 + 加超时/回退。这是现在挡在扩池前的墙。
+2. **[P1] shippingWarehouse 配置持久化**：`real-calibration` 重生成 selector-config 会丢 `shippingWarehouse`——需让校准保留它，或换个持久化位置（否则每次校准后要重设 LIVELY）。
+3. **[P1] 62-SKU OOM**：本次未复现，但仍是已知高危；layer-2 单会话方案继续。
+4. **[P2] LLM 品类映射兜底 TODO**；批量扩池（绿样本机制已通用化，可推广到更大账号池）。
