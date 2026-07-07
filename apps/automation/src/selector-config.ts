@@ -9,6 +9,12 @@ export type DianxiaomiSelectorConfig = {
   mediaTools?: Partial<Record<"imageTranslation" | "whiteBackground" | "imageEditor" | "batchResize" | "imageManagement", string[]>>
   mediaToolActions?: Partial<Record<"apply" | "close", Partial<Record<"imageTranslation" | "whiteBackground" | "imageEditor" | "batchResize" | "imageManagement", string[]>>>>
   skuRows?: string[]
+  // Account-level shipping warehouse (半托管 发货仓) the listing must bind to, e.g.
+  // "LIVELY". Temu rejects publish when the product is bound to an unsupported
+  // warehouse (库存信息校验失败：不支持发货仓…). This is customer-specific — set it in
+  // the account's selector config. When unset, normalizeShippingWarehouse skips
+  // (never touches other accounts' warehouse binding).
+  shippingWarehouse?: string
 }
 
 const normalizeSelectorList = (value: unknown) =>
@@ -57,7 +63,10 @@ export const loadSelectorConfig = (configPath: string | undefined): DianxiaomiSe
         imageManagement: normalizeSelectorList(raw.mediaToolActions?.close?.imageManagement)
       }
     },
-    skuRows: normalizeSelectorList(raw.skuRows)
+    skuRows: normalizeSelectorList(raw.skuRows),
+    shippingWarehouse: typeof raw.shippingWarehouse === "string" && raw.shippingWarehouse.trim().length > 0
+      ? raw.shippingWarehouse.trim()
+      : undefined
   }
 }
 

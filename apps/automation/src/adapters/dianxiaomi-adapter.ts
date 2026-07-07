@@ -2721,6 +2721,150 @@ export const normalizeShipmentPromise = async (page: Page) => {
   )
 }
 
+// Temu rejects publish when the listing is bound to an unsupported 发货仓:
+//   接口报错：库存信息校验失败：该商品不支持绑定发货仓 <X>，请替换为【三方仓/自营仓/家庭仓】
+// The 选择仓库 control is an antd-VUE multi-select: it opens on a native `mousedown`
+// (NOT a Playwright .click — that's why high-level clicks never opened it), showing a
+// searchable list of `.ant-select-item-option` warehouse entries. The correct
+// warehouse is ACCOUNT-SPECIFIC (e.g. "LIVELY"), so the target comes from
+// config.shippingWarehouse — when unset, this step skips and never touches another
+// account's binding. When set, it ensures ONLY the target warehouse is selected
+// (picks the target, deselects any others). Interactions go through dispatched
+// MouseEvents because that is the only thing this Vue control responds to.
+// Exported for the warehouse verification probe (calls production fn).
+export const normalizeShippingWarehouse = async (page: Page, config: DianxiaomiSelectorConfig) => {
+  const target = toNonEmptyText(config.shippingWarehouse)
+  if (!target) {
+    return stepResult(
+      "normalize-shipping-warehouse",
+      "Normalize shipping warehouse",
+      "skipped",
+      "No config.shippingWarehouse configured for this account"
+    )
+  }
+
+  // Dispatch a full mousedown/mouseup/click gesture on a page element (by a
+  // describable finder) — the antd-vue select only reacts to native mousedown.
+  const fireMouseGesture = (finder: "opener" | "option", optionText: string) =>
+    page.evaluate(({ finder, optionText }) => {
+      const clean = (s: string) => (s ?? "").replace(/\s+/g, " ").trim()
+      let el: HTMLElement | undefined
+      if (finder === "opener") {
+        const wh = Array.from(document.querySelectorAll(".ant-select.in-selector")).find(
+          (s) => /（其他）|LV\d|仓/.test(clean((s as HTMLElement).innerText || "")) && (s as HTMLElement).className.includes("ant-select-multiple")
+        ) as HTMLElement | undefined
+        el = wh?.querySelector(".ant-select-selector") as HTMLElement | undefined
+      } else {
+        el = Array.from(document.querySelectorAll(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option"))
+          .find((o) => clean((o as HTMLElement).innerText) === optionText) as HTMLElement | undefined
+      }
+      if (!el) {
+        return false
+      }
+      el.scrollIntoView({ block: "center" })
+      const r = el.getBoundingClientRect()
+      for (const type of ["mousedown", "mouseup", "click"]) {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }))
+      }
+      return true
+    }, { finder, optionText })
+
+  const readState = () =>
+    page.evaluate(() => {
+      const clean = (s: string) => (s ?? "").replace(/\s+/g, " ").trim()
+      const wh = Array.from(document.querySelectorAll(".ant-select.in-selector")).find(
+        (s) => /（其他）|LV\d|仓/.test(clean((s as HTMLElement).innerText || "")) && (s as HTMLElement).className.includes("ant-select-multiple")
+      ) as HTMLElement | undefined
+      const selected = wh
+        ? Array.from(wh.querySelectorAll(".ant-select-selection-item-content")).map((t) => clean((t as HTMLElement).innerText))
+        : []
+      const options = Array.from(document.querySelectorAll(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option"))
+        .map((o) => clean((o as HTMLElement).innerText)).filter(Boolean)
+      return { present: Boolean(wh), selected, options }
+    })
+
+  const before = await readState()
+  if (!before.present) {
+    return stepResult(
+      "normalize-shipping-warehouse",
+      "Normalize shipping warehouse",
+      "skipped",
+      "选择仓库 (shipping warehouse) control is not on this page"
+    )
+  }
+
+  // Already correct? (only the target selected)
+  const matchesTarget = (label: string) => label === target || label.startsWith(target) || label.includes(target)
+  if (before.selected.length === 1 && matchesTarget(before.selected[0])) {
+    return stepResult(
+      "normalize-shipping-warehouse",
+      "Normalize shipping warehouse",
+      "skipped",
+      `Shipping warehouse already bound to ${before.selected[0]}`,
+      { target, selected: before.selected }
+    )
+  }
+
+  // Open the dropdown and read options.
+  await fireMouseGesture("opener", "")
+  await page.waitForTimeout(900)
+  const opened = await readState()
+  const targetOption = opened.options.find((o) => matchesTarget(o))
+  if (!targetOption) {
+    // close and report — the configured warehouse is not in this account's list
+    await page.mouse.click(6, 6).catch(() => undefined)
+    return stepResult(
+      "normalize-shipping-warehouse",
+      "Normalize shipping warehouse",
+      "failed",
+      `Configured warehouse "${target}" is not in the 选择仓库 list: ${JSON.stringify(opened.options).slice(0, 200)}`,
+      { target, options: opened.options }
+    )
+  }
+
+  // Select the target (if not already), then deselect every other selected warehouse.
+  if (!before.selected.some((s) => matchesTarget(s))) {
+    await fireMouseGesture("option", targetOption)
+    await page.waitForTimeout(500)
+  }
+  // Re-open if it closed, then deselect others.
+  let state = await readState()
+  const others = () => state.selected.filter((s) => !matchesTarget(s))
+  let guard = 0
+  while (others().length > 0 && guard < 8) {
+    if (state.options.length === 0) {
+      await fireMouseGesture("opener", "")
+      await page.waitForTimeout(700)
+      state = await readState()
+    }
+    const victim = others()[0]
+    // find the matching visible option and toggle it off
+    const victimOption = state.options.find((o) => o === victim || o.includes(victim) || victim.includes(o)) ?? victim
+    const toggled = await fireMouseGesture("option", victimOption)
+    await page.waitForTimeout(450)
+    state = await readState()
+    if (!toggled) {
+      break
+    }
+    guard += 1
+  }
+
+  // Close the dropdown.
+  await page.mouse.click(6, 6).catch(() => undefined)
+  await page.waitForTimeout(500)
+  const after = await readState()
+  const clean = after.selected.length === 1 && matchesTarget(after.selected[0])
+  return stepResult(
+    "normalize-shipping-warehouse",
+    "Normalize shipping warehouse",
+    clean ? "done" : "failed",
+    clean
+      ? `Shipping warehouse bound to ${after.selected[0]} (was ${JSON.stringify(before.selected)})`
+      : `After normalization the selection is ${JSON.stringify(after.selected)}, expected only ${target}`,
+    { target, before: before.selected, after: after.selected }
+  )
+}
+
 const normalizeFreightTemplate = async (page: Page) => {
   const row = await findShipmentFieldContainer(page, FREIGHT_TEMPLATE_LABEL_TEXT, {
     requireSelect: true,
@@ -7133,6 +7277,7 @@ const prepareDraftPageWriteSurface = async (
   correctionSteps.push(await normalizeVariantAttributes(page))
   correctionSteps.push(await normalizeSiteWarehouse(page))
   correctionSteps.push(await normalizeShipmentPromise(page))
+  correctionSteps.push(await normalizeShippingWarehouse(page, config))
   correctionSteps.push(await normalizeFreightTemplate(page))
 
   const englishTitle = draft.listingTitle.trim()
