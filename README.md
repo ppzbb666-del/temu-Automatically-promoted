@@ -1,5 +1,19 @@
 # 店小秘主控的 Temu AI 自动上品系统
 
+> **2026-07-12 产品演进**：项目正在从 Temu 单平台自动上品板块升级为“多平台商品运营中台”。现有 Temu / 店小秘生产链路完整保留，新增的商品中心、采集中心、发布中心、任务中心、店铺管理、素材中心、规则中心和数据分析首先以只读兼容方式接入。TikTok Shop 为第二目标平台，但在官方字段、目标站点、开发者授权和草稿适配器完成前，服务端强制关闭写能力。
+
+## 多平台架构状态
+
+- **Temu**：继续使用现有店小秘浏览器自动化和插件，写能力已开启。
+- **TikTok Shop**：研究阶段，已建立规则证据矩阵，写能力关闭。
+- **Shopee / Amazon**：规划阶段，写能力关闭。
+- **标准商品**：现有 `PublishTask` 通过旁路转换为 `StandardProduct`，不修改旧任务数据。
+- **统一店铺**：`/shops` 将店小秘店铺指标转换为 `ShopAccount`。
+- **统一任务**：`/publishing/tasks` 将现有任务转换为跨平台发布任务摘要。
+- **能力门禁**：`/platforms/capabilities` 是控制台平台状态和未来写接口的唯一能力来源。
+
+详细路线见 [`docs/multi-platform-development-plan.md`](docs/multi-platform-development-plan.md)，TikTok Shop 规则研究见 [`docs/tiktok-shop-rules-matrix.md`](docs/tiktok-shop-rules-matrix.md)。
+
 > 把 1688 / 采集箱 / 手动录入的候选商品交给 AI 编排，再用 Playwright 驱动浏览器在店小秘里完成选品编辑、媒体处理、提交核价。
 > 当前写天花板 = **店小秘提交进入 Temu 核价**；Temu 侧的核价确认与最终上架是仅存的两项允许保留的人工步骤。
 
@@ -25,6 +39,8 @@ apps/automation    Playwright 浏览器自动化（dry-run / fill / save / submi
 packages/shared    共享类型、AI mock、核价规则
 docs/              规划与运行手册
 ```
+
+控制台当前采用多平台后台布局。首页仍承载原 Temu 无人值守入口；其他业务中心优先读取通用只读 API，实际 Temu 写操作继续回到原安全流程。
 
 ## 默认主路径：无人值守主流程
 

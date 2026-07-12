@@ -670,3 +670,17 @@ Next, continue hardening the unattended publish success/failure loop: add route-
 2. **[P1] shippingWarehouse 配置持久化**：`real-calibration` 重生成 selector-config 会丢 `shippingWarehouse`——需让校准保留它，或换个持久化位置（否则每次校准后要重设 LIVELY）。
 3. **[P1] 62-SKU OOM**：本次未复现，但仍是已知高危；layer-2 单会话方案继续。
 4. **[P2] LLM 品类映射兜底 TODO**；批量扩池（绿样本机制已通用化，可推广到更大账号池）。
+
+## 多平台运营中台旁路架构（2026/07/12）
+
+在不改动现有 Temu / 店小秘写链路的前提下，完成第一阶段多平台旁路改造：
+
+- 控制台升级为浏览器后台布局，新增商品、采集、发布、任务、店铺、素材、规则和数据分析中心。
+- 新增标准商品、统一店铺、平台刊登、平台能力、平台适配器和统一发布任务模型。
+- 新增只读 API：`/catalog/products`、`/shops`、`/publishing/tasks`、`/platforms/capabilities`。
+- Temu 继续启用现有写流程；TikTok Shop 为研究阶段；Shopee 和 Amazon 为规划阶段。
+- 服务端新增 `assertPlatformWriteEnabled`，未开放平台统一抛出 `PLATFORM_WRITE_DISABLED`。
+- 建立 TikTok Shop 规则研究基线；失效官方链接不会作为实现依据，未验证规则不进入发布门禁。
+- 完成桌面与手机浏览器视觉验收，移动端无横向溢出。
+
+详细状态见 `docs/multi-platform-development-plan.md` 和 `docs/tiktok-shop-rules-matrix.md`。

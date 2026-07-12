@@ -1,10 +1,24 @@
 # CLAUDE.md
 
+> **多平台迁移说明（2026-07-12）**：仓库当前产品定位已经升级为多平台商品运营中台，但 Temu / 店小秘仍是唯一生产写链路。所有新平台必须经过 `PlatformCapabilityProfile.writeEnabled` 和服务端 `assertPlatformWriteEnabled`；当前 TikTok Shop、Shopee、Amazon 均禁止写入。不要因为控制台出现平台名称就认为适配器已经可用。
+
 > 给未来打开这个仓库的 Claude / 协作者。读这一份就够开始动手；细节去 [`docs/`](docs/)。
 
 ## 1. 这是什么
 
 **temu-ai-ops** —— 店小秘主控的 Temu 自动上品系统。把 1688 / 采集箱 / 手动录入的候选商品交给 AI 编排，再用 Playwright 驱动浏览器在店小秘里完成选品编辑、媒体处理、提交核价。**当前写天花板停在店小秘提交** —— Temu 侧核价确认、最终上架是唯一允许保留的人工步骤。
+
+同时，项目已经新增多平台旁路架构：
+
+- `packages/shared/src/platform.ts`：标准商品、统一店铺、平台刊登、平台能力和统一发布任务模型。
+- `packages/shared/src/platform-adapter.ts`：平台适配器契约。
+- `apps/server/src/platform-registry.ts`：平台能力注册表和统一写保护。
+- `GET /catalog/products`：标准商品只读目录。
+- `GET /shops`：统一店铺账号目录。
+- `GET /publishing/tasks`：统一发布任务目录。
+- `GET /platforms/capabilities`：平台阶段、能力和阻塞原因。
+
+迁移策略是旁路读取、兼容展示、证据充分后再迁移写入口。不得删除或绕过现有 Temu 安全门禁。
 
 ## 2. 仓库形态
 
@@ -18,6 +32,8 @@ apps/automation    Playwright 浏览器自动化（dry-run / fill / save / submi
 packages/shared    共享类型、AI mock、核价规则
 docs/              规划与运行手册（见 §7 索引）
 ```
+
+多平台开发计划：[`docs/multi-platform-development-plan.md`](docs/multi-platform-development-plan.md)。TikTok Shop 规则基线：[`docs/tiktok-shop-rules-matrix.md`](docs/tiktok-shop-rules-matrix.md)。
 
 AI 编排的**任务规划骨架**仍为 mock（[`packages/shared/src/mock.ts`](packages/shared/src/mock.ts)），但**文案生成已接真实大模型**：交互式重规划（`POST /plan/:productId`）会用 OpenAI 兼容模型覆写标题/卖点/描述，未配 `LLM_API_KEY` 或调用失败自动回退规则草稿。详见 [`docs/content-generation.md`](docs/content-generation.md)「真实大模型增强」。无人值守批量仍走确定性规则（刻意为之）。
 
