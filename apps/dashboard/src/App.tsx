@@ -486,7 +486,7 @@ const resolveDefaultReadyStoreScopeFromMetrics = (
   ?? null
 
 const formatStoreScopeLabel = (option: Pick<StoreScopeOption, "label" | "storeId" | "readyCount" | "workItemCount">) =>
-  `${option.label}${option.storeId ? ` (${option.storeId})` : ""} 路 ready ${option.readyCount} / items ${option.workItemCount}`
+  `${option.label}${option.storeId ? ` (${option.storeId})` : ""} · ready ${option.readyCount} / items ${option.workItemCount}`
 
 const formatStoreSyncTimestamp = (value?: string) => {
   if (!value) {
@@ -537,11 +537,11 @@ const summarizeImageCheckIssues = (
 const describeStoreQueueState = (option: StoreScopeOption) => {
   if (option.workItemCount === 0) {
     return option.collectedCount > 0
-      ? `宸插鍏ュ緟澶勭悊 ${option.collectedCount}`
-      : "宸茶瘑鍒簵閾猴紝鏆傛棤鍟嗗搧闃熷垪"
+      ? `已导入待处理 ${option.collectedCount}`
+      : "已识别店铺，暂无商品队列"
   }
 
-  return `ready ${option.readyCount} / 鍟嗗搧 ${option.workItemCount} / blocked ${option.blockedCount}`
+  return `ready ${option.readyCount} / 商品 ${option.workItemCount} / blocked ${option.blockedCount}`
 }
 
 const delay = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -586,7 +586,7 @@ export function App() {
   const [manualProduct, setManualProduct] = useState<ManualProductInput>(defaultManualProduct)
   const [manualAttributesText, setManualAttributesText] = useState("")
   const [manualImagesText, setManualImagesText] = useState("")
-  const [manualSkusText, setManualSkusText] = useState("榛樿瑙勬牸,0,0,")
+  const [manualSkusText, setManualSkusText] = useState("默认规格,0,0,")
   const [productEditDraft, setProductEditDraft] = useState<ProductEditDraft | null>(null)
   const [listingEditDraft, setListingEditDraft] = useState<ListingEditDraft | null>(null)
   const [reviewNote, setReviewNote] = useState("")
@@ -1053,7 +1053,7 @@ export function App() {
 
   const runCurrentStoreScan = async () => {
     if (!activeDianxiaomiPageContext) {
-      throw new Error("鏈瘑鍒簵灏忕椤甸潰搴楅摵锛岃鍏堟墦寮€瀵瑰簲搴楅摵椤甸潰")
+      throw new Error("未识别店小秘页面店铺，请先打开对应店铺页面")
     }
 
     const result = await dianxiaomiAccountScanner.mutateAsync({
@@ -1083,7 +1083,7 @@ export function App() {
     const targetStoreId = override?.storeId ?? activeDianxiaomiPageContext?.storeId
     const targetStoreName = override?.storeName ?? activeDianxiaomiPageContext?.storeName
     if (!targetStoreId && !targetStoreName) {
-      throw new Error("鏈瘑鍒簵灏忕椤甸潰搴楅摵锛屾棤娉曞鍏ヨ椤甸潰搴楅摵閾炬帴")
+      throw new Error("未识别店小秘页面店铺，无法导入该页面店铺链接")
     }
 
     return dianxiaomiAccountScanImporter.mutateAsync({
@@ -1205,7 +1205,7 @@ export function App() {
       setManualProduct(defaultManualProduct)
       setManualAttributesText("")
       setManualImagesText("")
-      setManualSkusText("榛樿瑙勬牸,0,0,")
+      setManualSkusText("默认规格,0,0,")
     }
   })
 
@@ -1440,7 +1440,7 @@ export function App() {
     },
     onSuccess: async ({ workItem, exported, flow }) => {
       setSelectedTaskFileExportId(exported.exportId)
-      setDailySaveDraftProofMessage(`宸插惎鍔ㄤ繚瀛樿崏绋块獙璇侊細${workItem.title}`)
+      setDailySaveDraftProofMessage(`已启动保存草稿验证：${workItem.title}`)
       setAutomationFullFlowMessage(`save-draft proof started: ${flow.artifactDir}`)
       await refetch()
       await refetchAutomationTaskFileExports()
@@ -1710,7 +1710,7 @@ export function App() {
   const selectorConfigGenerator = useMutation({
     mutationFn: generateSelectorConfig,
     onSuccess: async (result) => {
-      setSelectorConfigMessage(`宸茬敓鎴愰€夋嫨鍣ㄩ厤缃細${result.configPath}`)
+      setSelectorConfigMessage(`已生成选择器配置：${result.configPath}`)
       await refetchSelectorConfig()
       await refetchSelectorConfigValidation()
       await refetchSelectorWorkbench()
@@ -1773,7 +1773,7 @@ export function App() {
         sourceBuckets
       }),
     onSuccess: async (result, variables) => {
-      setAccountScanMessage(`宸插鍏?${result.importedCount} 涓摼鎺ワ紝ready ${result.readyCount}锛屽緟淇 ${result.needsRevisionCount}`)
+      setAccountScanMessage(`已导入?${result.importedCount} 个链接，ready ${result.readyCount}，待修订 ${result.needsRevisionCount}`)
       setSelectedAccountScanLinkIds([])
       if (variables.storeScopeKey) {
         setSelectedStoreScopeKey(variables.storeScopeKey)
@@ -1813,7 +1813,7 @@ export function App() {
         if (job.status === "failed") {
           currentStoreAutoImportRef.current = null
           setCurrentStoreImportJobId(null)
-          setAccountScanMessage(job.error ?? "搴楀皬绉橀〉闈㈠簵閾洪摼鎺ユ睜鎵弿澶辫触")
+          setAccountScanMessage(job.error ?? "店小秘页面店铺链接池扫描失败")
           await refetchDianxiaomiAccountScanJobs()
           return
         }
@@ -2062,7 +2062,7 @@ export function App() {
       mediaAutomationTools: automationStartInput.mediaAutomationTools
     }),
     onSuccess: async (result) => {
-      setRepairMessage(`鑷姩淇宸插惎鍔細${result.workItemId ?? result.id}`)
+      setRepairMessage(`自动修复已启动：${result.workItemId ?? result.id}`)
       await refetchAutomationRepairApplyJobs()
       await refetchAutomationRepairPreviewJobs()
       await refetchDianxiaomiProductWorkItems()
@@ -2262,7 +2262,7 @@ export function App() {
   const allStoreScopeMetrics = sumStoreScopeMetrics(storeMetrics)
   const selectedStoreScopeMetrics: StoreScopeOption = selectedStoreScope ?? {
     key: ALL_STORES_SCOPE_KEY,
-    label: "鍏ㄩ儴搴楅摵",
+    label: "全部店铺",
     workItemCount: allStoreScopeMetrics.workItemCount,
     readyCount: allStoreScopeMetrics.readyCount,
     collectedCount: allStoreScopeMetrics.collectedCount,
@@ -2294,10 +2294,10 @@ export function App() {
     : []
   const dianxiaomiProductWorkItems = scopeFilterEnabled ? scopedDianxiaomiProductWorkItems : []
   const selectedStoreScopeSummary = selectedStoreScopeKey === ALL_STORES_SCOPE_KEY
-    ? "鍏ㄩ儴搴楅摵"
+    ? "全部店铺"
     : selectedStoreScope
     ? formatStoreScopeLabel(selectedStoreScope)
-    : "鍏ㄩ儴搴楅摵"
+    : "全部店铺"
   const selectedStoreQueueInput = selectedStoreScope
     ? {
         storeId: selectedStoreScope.storeId,
@@ -2758,7 +2758,7 @@ export function App() {
                 tone={scopeNeedsRevisionCount + scopeBlockedCount > 0 ? "warn" : "neutral"}
               />
               <DailyMetric
-                label="鍥剧墖寰呮"
+                label="图片待检"
                 value={String(imageCheckPendingCount)}
                 detail={imageCheckIssueSummary || "已过检或未发现问题"}
                 tone={imageCheckPendingCount > 0 ? "warn" : "good"}
@@ -2828,22 +2828,22 @@ export function App() {
 
             <article className="daily-panel">
               <div className="daily-panel-head">
-                <strong>褰撳墠鑼冨洿</strong>
-                <span>鍙鐞嗗綋鍓嶉€変腑鐨?ready 鍟嗗搧</span>
+                <strong>当前范围</strong>
+                <span>只处理当前选中的ready 商品</span>
               </div>
               <div className="daily-scope-bar daily-scope-bar-compact">
                 <label className="daily-scope-control">
-                  <span>搴楅摵</span>
+                  <span>店铺</span>
                   <select value={selectedStoreScopeKey} onChange={(event) => handleStoreScopeChange(event.target.value)}>
-                    <option value="auto">鑷姩閫夋嫨褰撳墠搴楅摵</option>
-                    <option value={ALL_STORES_SCOPE_KEY}>鍏ㄩ儴搴楅摵</option>
+                    <option value="auto">自动选择当前店铺</option>
+                    <option value={ALL_STORES_SCOPE_KEY}>全部店铺</option>
                     {storeScopeOptions.map((option) => (
                       <option key={option.key} value={option.key}>{formatStoreScopeLabel(option)}</option>
                     ))}
                   </select>
                 </label>
                 <div className="daily-scope-summary">
-                  <strong>澶勭悊鑼冨洿</strong>
+                  <strong>处理范围</strong>
                   <span>{selectedQueueScopeSummary}</span>
                   <span className="daily-scope-meta">ready {scopeReadyCount} / items {scopeWorkItemCount}</span>
                 </div>
@@ -2852,11 +2852,11 @@ export function App() {
               {storeScopeMessage ? <p className="daily-message">{storeScopeMessage}</p> : null}
               <div className="daily-mini-feed compact">
                 <div>
-                  <strong>褰撳墠椤甸潰</strong>
+                  <strong>当前页面</strong>
                   <span>{currentPageStorePoolLabel}</span>
                 </div>
                 <div>
-                  <strong>褰撳墠搴楅摵</strong>
+                  <strong>当前店铺</strong>
                   <span>{currentPageStoreScopeLabel}</span>
                 </div>
               </div>
@@ -2892,10 +2892,10 @@ export function App() {
               </div>
               {accountScanMessage ? <p className="daily-message">{accountScanMessage}</p> : null}
               <details className="daily-inline-details">
-                <summary>璋冩暣鑼冨洿</summary>
+                <summary>调整范围</summary>
                 <div className="daily-inline-detail-body">
                   <label className="daily-scope-control">
-                    <span>閫夋嫨鏂瑰紡</span>
+                    <span>选择方式</span>
                     <select
                       value={selectedQueueProductScopeMode}
                       onChange={(event) => setSelectedQueueProductScopeMode(event.target.value as QueueProductScopeMode)}
@@ -2947,7 +2947,7 @@ export function App() {
 
             <article className="daily-panel">
               <div className="daily-panel-head">
-                <strong>鑷姩澶勭悊</strong>
+                <strong>自动处理</strong>
                 <span>{dailySaveDraftProofStatusLabel}</span>
               </div>
               <div className="daily-mini-feed compact">
@@ -2956,7 +2956,7 @@ export function App() {
                   <span>{imageCheckPendingCount > 0 ? "待检 " + String(imageCheckPendingCount) + " / " + (imageCheckIssueSummary || "有图片问题") : "当前已过检"}</span>
                 </div>
                 <div>
-                  <strong>鑽夌楠岃瘉</strong>
+                  <strong>草稿验证</strong>
                   <span>{dailySaveDraftCandidateSummary}</span>
                 </div>
               </div>
@@ -2993,7 +2993,7 @@ export function App() {
                   {dailySaveDraftProofRunning ? "验证中..." : "验证保存草稿"}
                 </button>
                 <button className="ghost-button small-button" onClick={() => setShowDailyDetails((current) => !current)}>
-                  {showDailyDetails ? "鏀惰捣鏄庣粏" : "鏌ョ湅鏄庣粏"}
+                  {showDailyDetails ? "收起明细" : "查看明细"}
                 </button>
               </div>
               {imageCheckMessage ? <p className="daily-message">{imageCheckMessage}</p> : null}
@@ -3018,13 +3018,13 @@ export function App() {
                 </div>
               ) : (
                 <div className="daily-alert empty">
-                  <strong>褰撳墠娌℃湁棰濆闃诲</strong>
+                  <strong>当前没有额外阻塞</strong>
                   <span>继续让店小秘页内插件加队列，然后在这里试跑或启动无人值守。</span>
                 </div>
               )}
               <div className="daily-mini-feed compact">
                 <div>
-                  <strong>浜哄伐鎺ユ墜</strong>
+                  <strong>人工接手</strong>
                   <span>{dailyManualReviewSummary}</span>
                 </div>
                 <div>
@@ -3055,7 +3055,7 @@ export function App() {
             <section className="daily-grid daily-validation-grid">
               <article className="daily-panel">
                 <div className="daily-panel-head">
-                  <strong>鍚姩楠屾敹</strong>
+                  <strong>启动验收</strong>
                   <span>{startupBlockingChecks.length} blocked / {startupWarningChecks.length} warning</span>
                 </div>
                 <div className="daily-check-list">
@@ -3076,7 +3076,7 @@ export function App() {
                     ))}
                   {startupBlockingChecks.length === 0 && startupWarningChecks.length === 0 ? (
                     <div className="daily-check pass">
-                      <strong>鍚姩鏉′欢姝ｅ父</strong>
+                      <strong>启动条件正常</strong>
                       <span>可以启动无人值守队列。</span>
                     </div>
                   ) : null}
@@ -3087,7 +3087,7 @@ export function App() {
                     onClick={() => void selectorCalibrationRunner.mutateAsync({ headed: true })}
                     disabled={selectorCalibrationRunner.isPending}
                   >
-                    {selectorCalibrationRunner.isPending ? "鏍″噯涓?.." : "鎵撳紑椤甸潰鏍″噯"}
+                    {selectorCalibrationRunner.isPending ? "鏍″噯涓?.." : "打开页面校准"}
                   </button>
                   <button
                     className="ghost-button small-button"
@@ -3151,7 +3151,7 @@ export function App() {
               onClick={() => void batchReviewer.mutateAsync({ taskIds: selectedReviewableTaskIds, decision: "approve", note: reviewNote })}
               disabled={batchReviewer.isPending || selectedReviewableTaskIds.length === 0}
             >
-              鎵归噺閫氳繃
+              批量通过
             </button>
             <button
               className="ghost-button small-button"
@@ -3165,7 +3165,7 @@ export function App() {
               onClick={() => void batchReviewer.mutateAsync({ taskIds: selectedReviewableTaskIds, decision: "reject", note: reviewNote })}
               disabled={batchReviewer.isPending || selectedReviewableTaskIds.length === 0}
             >
-              鎵归噺椹冲洖
+              批量驳回
             </button>
           </div>
           <div className="review-actions">
@@ -3181,7 +3181,7 @@ export function App() {
               onClick={() => void batchDraftRestorer.mutateAsync(selectedTaskIds)}
               disabled={batchDraftRestorer.isPending || selectedTaskIds.length === 0}
             >
-              鎵归噺鎭㈠ AI 鑽夌
+              批量恢复 AI 草稿
             </button>
           </div>
           {batchRestoreMessage ? (
@@ -3464,20 +3464,20 @@ export function App() {
               <p>保存后会重新计算待执行任务的价格。</p>
             </div>
             <div className="pricing-form">
-              <label>姹囩巼 CNY/USD<input type="number" step="0.01" value={pricingDraft.exchangeRateCnyPerUsd} onChange={(event) => setPricingField("exchangeRateCnyPerUsd", event.target.value)} /></label>
-              <label>鐗╂祦 USD/kg<input type="number" step="0.01" value={pricingDraft.logisticsUsdPerKg} onChange={(event) => setPricingField("logisticsUsdPerKg", event.target.value)} /></label>
+              <label>汇率 CNY/USD<input type="number" step="0.01" value={pricingDraft.exchangeRateCnyPerUsd} onChange={(event) => setPricingField("exchangeRateCnyPerUsd", event.target.value)} /></label>
+              <label>物流 USD/kg<input type="number" step="0.01" value={pricingDraft.logisticsUsdPerKg} onChange={(event) => setPricingField("logisticsUsdPerKg", event.target.value)} /></label>
               <label>骞冲彴璐?USD<input type="number" step="0.01" value={pricingDraft.platformFeeUsd} onChange={(event) => setPricingField("platformFeeUsd", event.target.value)} /></label>
               <label>目标毛利率<input type="number" step="0.01" value={pricingDraft.targetMarginRate} onChange={(event) => setPricingField("targetMarginRate", event.target.value)} /></label>
-              <label>鍞环鍊嶆暟<input type="number" step="0.01" value={pricingDraft.priceMultiplier} onChange={(event) => setPricingField("priceMultiplier", event.target.value)} /></label>
-              <label>鏈€浣庢瘺鍒╃巼<input type="number" step="0.01" value={pricingDraft.minimumMarginRate} onChange={(event) => setPricingField("minimumMarginRate", event.target.value)} /></label>
-              <label>鏈€浣庡缓璁敭浠?USD<input type="number" step="0.01" value={pricingDraft.minimumSuggestedPriceUsd} onChange={(event) => setPricingField("minimumSuggestedPriceUsd", event.target.value)} /></label>
-              <label>鐗╂祦鍒嗘<textarea className="compact-textarea" placeholder="鏈€灏忛噸閲?鏈€澶ч噸閲?鍩虹璐?姣弅g璐圭敤銆備緥濡傦細0,0.25,0.35,3.6" value={logisticsTiersText} onChange={(event) => setLogisticsTiersText(event.target.value)} /></label>
+              <label>售价倍数<input type="number" step="0.01" value={pricingDraft.priceMultiplier} onChange={(event) => setPricingField("priceMultiplier", event.target.value)} /></label>
+              <label>最低毛利率<input type="number" step="0.01" value={pricingDraft.minimumMarginRate} onChange={(event) => setPricingField("minimumMarginRate", event.target.value)} /></label>
+              <label>最低建议售价?USD<input type="number" step="0.01" value={pricingDraft.minimumSuggestedPriceUsd} onChange={(event) => setPricingField("minimumSuggestedPriceUsd", event.target.value)} /></label>
+              <label>物流分段<textarea className="compact-textarea" placeholder="最小重量?最大重量?基础费?每kg费用。例如：0,0.25,0.35,3.6" value={logisticsTiersText} onChange={(event) => setLogisticsTiersText(event.target.value)} /></label>
             </div>
             <button className="primary-button import-button" onClick={() => {
               const input = buildPricingPayload()
               if (input) void pricingUpdater.mutateAsync(input)
             }} disabled={pricingUpdater.isPending}>
-              {pricingUpdater.isPending ? "淇濆瓨涓?.." : "淇濆瓨鏍镐环瑙勫垯"}
+              {pricingUpdater.isPending ? "淇濆瓨涓?.." : "保存核价规则"}
             </button>
           </div>
         ) : null}
@@ -3527,14 +3527,14 @@ export function App() {
           <>
             <section className="hero-panel">
               <div className="hero-copy">
-                <p className="eyebrow">褰撳墠鍟嗗搧</p>
+                <p className="eyebrow">当前商品</p>
                 <h2>{activeTask.product.title}</h2>
-                <p className="subtle">鏉ユ簮 {activeTask.product.source} / 绫荤洰 {activeTask.product.category}</p>
+                <p className="subtle">来源 {activeTask.product.source} / 类目 {activeTask.product.category}</p>
                 <p className="ready-note">{readyLabel}</p>
               </div>
               <div className="hero-actions">
                 <button className="ghost-button" onClick={() => void planner.mutateAsync(activeTask.product.id)} disabled={planner.isPending}>
-                  {planner.isPending ? "AI 澶勭悊涓?.." : "AI 閲嶆柊鐢熸垚鏂规"}
+                  {planner.isPending ? "AI 澶勭悊涓?.." : "AI 重新生成方案"}
                 </button>
                 <button className="primary-button" onClick={() => void syncer.mutateAsync(activeTask.id)} disabled={syncer.isPending || !canSyncToStore}>
                   {syncer.isPending ? "同步中..." : canSyncToStore ? "一键同步到店小秘" : "等待审核通过"}
@@ -3551,19 +3551,19 @@ export function App() {
 
             <section className="main-grid">
               <article className="panel">
-                <div className="panel-head"><h3>AI 涓婂搧鏂规</h3></div>
-                <InfoBlock label="鍙戝竷鏍囬">{activeTask.draft.listingTitle}</InfoBlock>
-                <InfoBlock label="鏍稿績鍗栫偣">
+                <div className="panel-head"><h3>AI 上品方案</h3></div>
+                <InfoBlock label="发布标题">{activeTask.draft.listingTitle}</InfoBlock>
+                <InfoBlock label="核心卖点">
                   <div className="tag-list">{activeTask.draft.sellingPoints.map((point) => <span key={point} className="tag-chip">{point}</span>)}</div>
                 </InfoBlock>
-                <InfoBlock label="鍟嗗搧鎻忚堪">{activeTask.draft.description}</InfoBlock>
-                <InfoBlock label="SKU 瀹氫环">
+                <InfoBlock label="商品描述">{activeTask.draft.description}</InfoBlock>
+                <InfoBlock label="SKU 定价">
                   <div className="sku-list">
                     {activeTask.draft.skuPricing.map((sku) => (
                       <div key={sku.skuId} className="sku-item">
                         <strong>{sku.skuName}</strong>
                         <span>{sku.attributeSummary}</span>
-                        <span>{formatMoney(sku.salePriceUsd)} / 搴撳瓨 {sku.stock}</span>
+                        <span>{formatMoney(sku.salePriceUsd)} / 库存 {sku.stock}</span>
                       </div>
                     ))}
                   </div>
@@ -3571,14 +3571,14 @@ export function App() {
               </article>
 
               <article className="panel">
-                <div className="panel-head"><h3>鑽夌缂栬緫</h3></div>
+                <div className="panel-head"><h3>草稿编辑</h3></div>
                 {listingEditDraft ? (
                   <>
                     <div className="pricing-form">
-                      <label>鍙戝竷鏍囬<input value={listingEditDraft.listingTitle} onChange={(event) => setListingEditField("listingTitle", event.target.value)} /></label>
-                      <label>鏍稿績鍗栫偣<textarea className="compact-textarea" value={listingEditDraft.sellingPointsText} onChange={(event) => setListingEditField("sellingPointsText", event.target.value)} /></label>
-                      <label>鍟嗗搧鎻忚堪<textarea className="compact-textarea tall-textarea" value={listingEditDraft.description} onChange={(event) => setListingEditField("description", event.target.value)} /></label>
-                      <label>绫荤洰璺緞<textarea className="compact-textarea" value={listingEditDraft.categoryPathText} onChange={(event) => setListingEditField("categoryPathText", event.target.value)} /></label>
+                      <label>发布标题<input value={listingEditDraft.listingTitle} onChange={(event) => setListingEditField("listingTitle", event.target.value)} /></label>
+                      <label>核心卖点<textarea className="compact-textarea" value={listingEditDraft.sellingPointsText} onChange={(event) => setListingEditField("sellingPointsText", event.target.value)} /></label>
+                      <label>商品描述<textarea className="compact-textarea tall-textarea" value={listingEditDraft.description} onChange={(event) => setListingEditField("description", event.target.value)} /></label>
+                      <label>类目路径<textarea className="compact-textarea" value={listingEditDraft.categoryPathText} onChange={(event) => setListingEditField("categoryPathText", event.target.value)} /></label>
                       <label>草稿属性<textarea className="compact-textarea" value={listingEditDraft.attributesText} onChange={(event) => setListingEditField("attributesText", event.target.value)} /></label>
                       <label>SKU 售价<textarea className="compact-textarea tall-textarea" placeholder="skuId,SKU名,售价USD,库存,属性" value={listingEditDraft.skuPricingText} onChange={(event) => setListingEditField("skuPricingText", event.target.value)} /></label>
                     </div>
@@ -3586,10 +3586,10 @@ export function App() {
                       const input = buildDraftUpdatePayload()
                       if (input) void draftUpdater.mutateAsync({ taskId: activeTask.id, input })
                     }} disabled={draftUpdater.isPending || !listingEditDraft.listingTitle}>
-                      {draftUpdater.isPending ? "淇濆瓨涓?.." : "淇濆瓨鑽夌鍐呭"}
+                      {draftUpdater.isPending ? "淇濆瓨涓?.." : "保存草稿内容"}
                     </button>
                     <div className="draft-history">
-                      <strong>鑽夌鐗堟湰</strong>
+                      <strong>草稿版本</strong>
                       {(activeTask.draftVersions ?? []).length > 0 ? (
                         <div className="draft-version-list">
                           {(activeTask.draftVersions ?? []).slice(0, 8).map((version) => (
@@ -3603,12 +3603,12 @@ export function App() {
                                 onClick={() => void draftRestorer.mutateAsync({ taskId: activeTask.id, versionId: version.id })}
                                 disabled={draftRestorer.isPending}
                               >
-                                鎭㈠
+                                恢复
                               </button>
                             </div>
                           ))}
                         </div>
-                      ) : <div className="empty-report">鏆傛棤鑽夌鐗堟湰</div>}
+                      ) : <div className="empty-report">暂无草稿版本</div>}
                     </div>
                   </>
                 ) : null}
@@ -3617,20 +3617,20 @@ export function App() {
 
             <section className="main-grid">
               <article className="panel">
-                <div className="panel-head"><h3>鍟嗗搧缂栬緫</h3></div>
+                <div className="panel-head"><h3>商品编辑</h3></div>
                 {productEditDraft ? (
                   <>
                     <div className="pricing-form two-col-form">
-                      <label>鍟嗗搧鏍囬<input value={productEditDraft.title} onChange={(event) => setProductEditField("title", event.target.value)} /></label>
-                      <label>绫荤洰<input value={productEditDraft.category} onChange={(event) => setProductEditField("category", event.target.value)} /></label>
+                      <label>商品标题<input value={productEditDraft.title} onChange={(event) => setProductEditField("title", event.target.value)} /></label>
+                      <label>类目<input value={productEditDraft.category} onChange={(event) => setProductEditField("category", event.target.value)} /></label>
                       <label>鎴愭湰浠?CNY<input type="number" step="0.01" value={productEditDraft.supplierPriceCny} onChange={(event) => setProductEditField("supplierPriceCny", event.target.value)} /></label>
-                      <label>鍥藉唴杩愯垂 CNY<input type="number" step="0.01" value={productEditDraft.estimatedDomesticShippingCny} onChange={(event) => setProductEditField("estimatedDomesticShippingCny", event.target.value)} /></label>
-                      <label>閲嶉噺 kg<input type="number" step="0.01" value={productEditDraft.estimatedWeightKg} onChange={(event) => setProductEditField("estimatedWeightKg", event.target.value)} /></label>
+                      <label>国内运费 CNY<input type="number" step="0.01" value={productEditDraft.estimatedDomesticShippingCny} onChange={(event) => setProductEditField("estimatedDomesticShippingCny", event.target.value)} /></label>
+                      <label>重量 kg<input type="number" step="0.01" value={productEditDraft.estimatedWeightKg} onChange={(event) => setProductEditField("estimatedWeightKg", event.target.value)} /></label>
                       <label>总库存<input type="number" step="1" value={productEditDraft.stock} onChange={(event) => setProductEditField("stock", event.target.value)} /></label>
-                      <label className="wide-field">鏉ユ簮閾炬帴<input value={productEditDraft.sourceUrl} onChange={(event) => setProductEditField("sourceUrl", event.target.value)} /></label>
+                      <label className="wide-field">来源链接<input value={productEditDraft.sourceUrl} onChange={(event) => setProductEditField("sourceUrl", event.target.value)} /></label>
                       <label className="wide-field">商品属性<textarea className="compact-textarea" value={productEditDraft.attributesText} onChange={(event) => setProductEditField("attributesText", event.target.value)} /></label>
-                      <label className="wide-field">鍥剧墖閾炬帴<textarea className="compact-textarea" value={productEditDraft.imagesText} onChange={(event) => setProductEditField("imagesText", event.target.value)} /></label>
-                      <label className="wide-field">SKU 鍒楄〃<textarea className="compact-textarea tall-textarea" value={productEditDraft.skusText} onChange={(event) => setProductEditField("skusText", event.target.value)} /></label>
+                      <label className="wide-field">图片链接<textarea className="compact-textarea" value={productEditDraft.imagesText} onChange={(event) => setProductEditField("imagesText", event.target.value)} /></label>
+                      <label className="wide-field">SKU 列表<textarea className="compact-textarea tall-textarea" value={productEditDraft.skusText} onChange={(event) => setProductEditField("skusText", event.target.value)} /></label>
                     </div>
                     <button className="primary-button import-button" onClick={() => {
                       const input = buildProductUpdatePayload()
@@ -3649,7 +3649,7 @@ export function App() {
                   {publishCheck ? (
                     <>
                       <div className={"review-state " + (publishCheck.canPublish ? "approved" : "rejected")}>
-                        <strong>{publishCheck.canPublish ? "鍙互鍙戝竷" : "瀛樺湪闂"}</strong>
+                        <strong>{publishCheck.canPublish ? "可以发布" : "存在问题"}</strong>
                         <span>{new Date(publishCheck.checkedAt).toLocaleString()}</span>
                       </div>
                       <div className="risk-list-simple">
@@ -3669,22 +3669,22 @@ export function App() {
                 <div className="review-box">
                   <div className={"review-state " + (activeTask.review?.status ?? "pending")}>
                     <strong>{reviewStatusLabel[activeTask.review?.status ?? "pending"]}</strong>
-                    <span>{activeTask.review?.note || "鏆傛棤瀹℃牳澶囨敞"}</span>
+                    <span>{activeTask.review?.note || "暂无审核备注"}</span>
                   </div>
                   <textarea
                     className="compact-textarea"
-                    placeholder="濉啓瀹℃牳澶囨敞銆佷慨鏀硅姹傛垨椹冲洖鍘熷洜"
+                    placeholder="填写审核备注、修改要求或驳回原因"
                     value={reviewNote}
                     onChange={(event) => setReviewNote(event.target.value)}
                   />
                   <div className="review-actions">
                     <button className="primary-button" onClick={() => void reviewer.mutateAsync({ taskId: activeTask.id, decision: "approve", note: reviewNote })} disabled={reviewer.isPending}>
-                      瀹℃牳閫氳繃
+                      审核通过
                     </button>
                     <button className="ghost-button" onClick={() => void reviewer.mutateAsync({ taskId: activeTask.id, decision: "request_changes", note: reviewNote })} disabled={reviewer.isPending}>
-                      閫€鍥炰慨鏀?                    </button>
+                      退回修改?                    </button>
                     <button className="ghost-button danger-button" onClick={() => void reviewer.mutateAsync({ taskId: activeTask.id, decision: "reject", note: reviewNote })} disabled={reviewer.isPending}>
-                      椹冲洖
+                      驳回
                     </button>
                   </div>
                   <div className="review-history">
@@ -3694,13 +3694,13 @@ export function App() {
                           <span>{event.note || "无备注"}</span>
                         <small>{new Date(event.createdAt).toLocaleString()}</small>
                       </div>
-                    )) : <div className="empty-report">鏆傛棤瀹℃牳璁板綍</div>}
+                    )) : <div className="empty-report">暂无审核记录</div>}
                   </div>
                 </div>
               </article>
 
               <article className="panel">
-                <div className="panel-head"><h3>鎵ц姝ラ</h3></div>
+                <div className="panel-head"><h3>执行步骤</h3></div>
                 <div className="flow-list">
                   {activeTask.steps.map((step) => (
                     <div key={step.id} className={"flow-item step-" + step.status}>
@@ -3715,15 +3715,15 @@ export function App() {
 
             <section className="bottom-grid">
               <article className="panel">
-                <div className="panel-head"><h3>鏍镐环璇存槑</h3></div>
+                <div className="panel-head"><h3>核价说明</h3></div>
                 <div className="explain-list">{activeTask.pricing.rationale.map((item) => <div key={item} className="explain-item">{item}</div>)}</div>
               </article>
               <article className="panel">
-                <div className="panel-head"><h3>椋庨櫓鎻愰啋</h3></div>
+                <div className="panel-head"><h3>风险提醒</h3></div>
                 <div className="risk-list-simple">
                   {activeTask.risks.length > 0
                     ? activeTask.risks.map((risk) => <div key={risk.id} className={"risk-pill " + risk.level}>{risk.message}</div>)
-                    : <div className="empty-report">鏆傛棤椋庨櫓鎻愰啋</div>}
+                    : <div className="empty-report">暂无风险提醒</div>}
                 </div>
               </article>
             </section>
@@ -4291,7 +4291,7 @@ export function App() {
                     onClick={() => void selectorCalibrationRunner.mutateAsync({ headed: true })}
                     disabled={selectorCalibrationRunner.isPending}
                   >
-                    {selectorCalibrationRunner.isPending ? "starting calibration..." : "鍚姩椤甸潰鏍″噯"}
+                    {selectorCalibrationRunner.isPending ? "starting calibration..." : "启动页面校准"}
                   </button>
                   <button
                     className="ghost-button small-button"
