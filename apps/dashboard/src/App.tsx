@@ -626,6 +626,7 @@ export function App() {
   const [automationQueueDaemonInterval, setAutomationQueueDaemonInterval] = useState("60")
   const [automationQueueDaemonMaxFailures, setAutomationQueueDaemonMaxFailures] = useState("3")
   const [activeView, setActiveView] = useState<"daily" | "advanced" | "pod">("daily")
+  const [advancedTab, setAdvancedTab] = useState<"work" | "intake" | "config" | "diagnostics">("work")
   const [showDailyDetails, setShowDailyDetails] = useState(false)
   const [selectedStoreScopeKey, setSelectedStoreScopeKey] = useState("auto")
   const [selectedQueueProductScopeMode, setSelectedQueueProductScopeMode] = useState<QueueProductScopeMode>("ready-queue")
@@ -3128,14 +3129,24 @@ export function App() {
           ) : null}
         </main>
       ) : (
-        <div className="advanced-layout">
-      <aside className="sidebar">
-        <div className="brand-panel">
-          <p className="eyebrow">Advanced</p>
-          <h1>高级区</h1>
-          <p className="subtle">这里只保留人工处理、修复和诊断工具，不作为日常默认流程。</p>
-        </div>
+        <div className="advanced-shell">
+          <div className="advanced-tabbar">
+            <div className="advanced-tab-title">
+              <p className="eyebrow">Advanced</p>
+              <h1>高级区</h1>
+            </div>
+            <nav className="advanced-tabs">
+              <button type="button" className={"advanced-tab " + (advancedTab === "work" ? "active" : "")} onClick={() => setAdvancedTab("work")}>商品处理</button>
+              <button type="button" className={"advanced-tab " + (advancedTab === "intake" ? "active" : "")} onClick={() => setAdvancedTab("intake")}>录入采集</button>
+              <button type="button" className={"advanced-tab " + (advancedTab === "config" ? "active" : "")} onClick={() => setAdvancedTab("config")}>规则配置</button>
+              <button type="button" className={"advanced-tab " + (advancedTab === "diagnostics" ? "active" : "")} onClick={() => setAdvancedTab("diagnostics")}>修复诊断</button>
+            </nav>
+          </div>
+          <p className="advanced-console-hint">高级区默认隐藏，新增人工步骤前必须有自动化替代计划和下线时间。</p>
 
+          {advancedTab === "work" ? (
+            <div className="advanced-layout">
+              <aside className="sidebar">
         <div className="queue-panel">
           <div className="queue-head">
               <strong>商品任务</strong>
@@ -3218,308 +3229,10 @@ export function App() {
             ))}
           </div>
         </div>
-
-        <div className="queue-panel">
-          <div className="queue-head">
-            <strong>店小秘编辑队列</strong>
-            <p>{scopeWorkItemCount} 个店小秘商品待按需求规则编辑，当前范围 {selectedQueueScopeSummary}。</p>
-          </div>
-          {imageCheckMessage ? (
-            <div className="import-result">
-              <p>{imageCheckMessage}</p>
-            </div>
-          ) : null}
-          {repairMessage ? (
-            <div className="import-result">
-              <p>{repairMessage}</p>
-            </div>
-          ) : null}
-          <div className="collected-product-list">
-            {dianxiaomiProductWorkItems.length > 0 ? dianxiaomiProductWorkItems.slice(0, 6).map((item) => (
-              <div key={item.id} className="collected-product-item">
-                {(() => {
-                  const latestImageCheckJob = latestImageCheckJobByWorkItemId.get(item.id) ?? null
-                  const latestRepairPreviewJob = latestRepairPreviewJobByWorkItemId.get(item.id) ?? null
-                  const latestRepairApplyJob = latestRepairApplyJobByWorkItemId.get(item.id) ?? null
-                  const imageCheckIssues = item.snapshot.imageCheck?.issues ?? []
-                  const repairActions = item.repairPlan?.actions ?? []
-                  const autoRepairable = item.repairPlan?.status === "auto-ready"
-                    && item.repairPlan.canAutoRepair
-                    && repairActions.length > 0
-                    && repairActions.every((action) => action.automation === "auto")
-                  const repairRunning = latestRepairApplyJob?.status === "running" || latestRepairPreviewJob?.status === "running"
-                  const repairToolSummary = repairActions
-                    .filter((action) => action.payload?.writer === "run-media-tool")
-                    .map((action) => action.payload?.mediaTool ?? action.tool ?? action.target ?? action.label)
-                    .filter(Boolean)
-                    .join(" / ")
-                  return (
-                    <>
-                <div>
-                  <strong>{item.title}</strong>
-                  <span>{item.pageProfile ?? "店小秘商品"} / {item.status} / {item.storeName ?? item.storeId ?? "未知店铺"}</span>
-                  <small>{new Date(item.updatedAt).toLocaleString()} / 必检 {item.requirements.summary.requiredPassed}/{item.requirements.summary.requiredTotal} / SKU {item.snapshot.skuCount} / 图片 {item.snapshot.imageCount}</small>
-                  {item.snapshot.imageCheck ? (
-                    <small>
-                      图片检查：{item.snapshot.imageCheck.passed ? "通过" : imageCheckIssues.length > 0 ? imageCheckIssues.map((issue) => issue.category + " " + issue.issue).join(" / ") : "失败"}
-                    </small>
-                  ) : null}
-                  {latestImageCheckJob ? (
-                    <small>
-                      最近图片检查：{latestImageCheckJob.status}{latestImageCheckJob.result ? latestImageCheckJob.result.passed ? " / 通过" : " / " + latestImageCheckJob.result.summary.join(" / ") : ""}
-                    </small>
-                  ) : null}
-                  {item.repairPlan ? (
-                    <small>
-                      修复计划：{item.repairPlan.status} / {item.repairPlan.summary}{repairToolSummary ? " / " + repairToolSummary : ""}
-                    </small>
-                  ) : null}
-                  {latestRepairPreviewJob ? (
-                    <small>
-                      最近预修复：{latestRepairPreviewJob.status}{latestRepairPreviewJob.reportStatus ? " / " + latestRepairPreviewJob.reportStatus : ""}
-                    </small>
-                  ) : null}
-                  {latestRepairApplyJob ? (
-                    <small>
-                      最近执行修复：{latestRepairApplyJob.status}{latestRepairApplyJob.reportStatus ? " / " + latestRepairApplyJob.reportStatus : ""}
-                    </small>
-                  ) : null}
-                  {item.suggestedEdits.length > 0 ? (
-                    <small>{item.suggestedEdits.slice(0, 3).map((edit) => edit.field + ": " + (edit.suggestedValue || edit.reason)).join(" / ")}</small>
-                  ) : null}
-                </div>
-                <div className="task-export-actions">
-                  <button
-                    className="ghost-button small-button"
-                    onClick={() => window.open(item.pageUrl, "_blank", "noopener,noreferrer")}
-                  >
-                    打开页面
-                  </button>
-                  <button
-                    className="ghost-button small-button"
-                    onClick={() => void dianxiaomiImageChecker.mutateAsync({ workItemId: item.id })}
-                    disabled={dianxiaomiImageChecker.isPending || latestImageCheckJob?.status === "running"}
-                  >
-                    {latestImageCheckJob?.status === "running" ? "检查中..." : "图片检查"}
-                  </button>
-                  <button
-                    className="ghost-button small-button"
-                    onClick={() => void dianxiaomiRepairPreviewRunner.mutateAsync({ workItemId: item.id })}
-                    disabled={!item.repairPlan || repairRunning || dianxiaomiRepairPreviewRunner.isPending}
-                  >
-                    {latestRepairPreviewJob?.status === "running" ? "预览中..." : "预修复"}
-                  </button>
-                  <button
-                    className="primary-button small-button"
-                    onClick={() => void dianxiaomiRepairApplyRunner.mutateAsync({ workItemId: item.id })}
-                    disabled={!autoRepairable || repairRunning || dianxiaomiRepairApplyRunner.isPending}
-                  >
-                    {latestRepairApplyJob?.status === "running" ? "修复中..." : "执行自动修复"}
-                  </button>
-                  <button
-                    className="ghost-button small-button"
-                    onClick={() => void dianxiaomiWorkItemTaskCreator.mutateAsync(item.id)}
-                    disabled={dianxiaomiWorkItemTaskCreator.isPending}
-                  >
-                    生成编辑任务
-                  </button>
-                </div>
-                    </>
-                  )
-                })()}
-              </div>
-            )) : (
-              <div className="empty-report">打开店小秘采集/商品编辑页，点击插件按钮即可加入这里。</div>
-            )}
-          </div>
-        </div>
-
-        {dianxiaomiRequirementRulesDraft ? (
-          <div className="queue-panel">
-            <div className="queue-head">
-              <strong>店小秘上品规则</strong>
-              <p>保存后会重新计算队列中的所有店小秘商品。</p>
-            </div>
-            <div className="pricing-form dianxiaomi-rules-form">
-              <label>预设名称<input value={dianxiaomiRequirementRulesDraft.presetName} onChange={(event) => setDianxiaomiRequirementPresetName(event.target.value)} /></label>
-              <label className="rule-toggle">Title required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.title.required} onChange={(event) => setDianxiaomiRequirementRequired("title", event.target.checked)} /></label>
-              <label>Title min length<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.title.minLength} onChange={(event) => setDianxiaomiRequirementNumber("title", "minLength", event.target.value)} /></label>
-              <label>Title max length<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.title.maxLength} onChange={(event) => setDianxiaomiRequirementNumber("title", "maxLength", event.target.value)} /></label>
-              <label className="rule-toggle">Images required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.images.required} onChange={(event) => setDianxiaomiRequirementRequired("images", event.target.checked)} /></label>
-              <label>Minimum images<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.images.minCount} onChange={(event) => setDianxiaomiRequirementNumber("images", "minCount", event.target.value)} /></label>
-              <label className="rule-toggle">Media rules required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.required} onChange={(event) => setDianxiaomiRequirementRequired("media", event.target.checked)} /></label>
-              <label className="rule-toggle">Use image translation<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.requireImageTranslation} onChange={(event) => setDianxiaomiMediaBoolean("requireImageTranslation", event.target.checked)} /></label>
-              <label>Image translation language<input value={dianxiaomiRequirementRulesDraft.media.targetLanguage} onChange={(event) => setDianxiaomiMediaText("targetLanguage", event.target.value)} /></label>
-              <label className="rule-toggle">Normalize image size<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.requireSizeNormalization} onChange={(event) => setDianxiaomiMediaBoolean("requireSizeNormalization", event.target.checked)} /></label>
-              <label>Minimum image width<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.media.minWidthPx} onChange={(event) => setDianxiaomiRequirementNumber("media", "minWidthPx", event.target.value)} /></label>
-              <label>Minimum image height<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.media.minHeightPx} onChange={(event) => setDianxiaomiRequirementNumber("media", "minHeightPx", event.target.value)} /></label>
-              <label>Maximum image width<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.media.maxWidthPx} onChange={(event) => setDianxiaomiRequirementNumber("media", "maxWidthPx", event.target.value)} /></label>
-              <label>Maximum image height<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.media.maxHeightPx} onChange={(event) => setDianxiaomiRequirementNumber("media", "maxHeightPx", event.target.value)} /></label>
-              <label>Maximum image size MB<input type="number" step="0.1" value={dianxiaomiRequirementRulesDraft.media.maxSizeMb} onChange={(event) => setDianxiaomiRequirementNumber("media", "maxSizeMb", event.target.value)} /></label>
-              <label className="rule-toggle">Require white background<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.requireWhiteBackground} onChange={(event) => setDianxiaomiMediaBoolean("requireWhiteBackground", event.target.checked)} /></label>
-              <label className="rule-toggle">Image editor review<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.requireImageEditorReview} onChange={(event) => setDianxiaomiMediaBoolean("requireImageEditorReview", event.target.checked)} /></label>
-              <label>Dianxiaomi media tools<textarea className="compact-textarea" value={dianxiaomiMediaToolsText} onChange={(event) => setDianxiaomiMediaToolsText(event.target.value)} /></label>
-              <label className="rule-toggle">SKU required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.sku.required} onChange={(event) => setDianxiaomiRequirementRequired("sku", event.target.checked)} /></label>
-              <label>Minimum SKU rows<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.sku.minCount} onChange={(event) => setDianxiaomiRequirementNumber("sku", "minCount", event.target.value)} /></label>
-              <label className="rule-toggle">Price required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.price.required} onChange={(event) => setDianxiaomiRequirementRequired("price", event.target.checked)} /></label>
-              <label>Minimum price fields<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.price.minEditableFieldCount} onChange={(event) => setDianxiaomiRequirementNumber("price", "minEditableFieldCount", event.target.value)} /></label>
-              <label className="rule-toggle">Stock required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.stock.required} onChange={(event) => setDianxiaomiRequirementRequired("stock", event.target.checked)} /></label>
-              <label>Minimum stock fields<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.stock.minEditableFieldCount} onChange={(event) => setDianxiaomiRequirementNumber("stock", "minEditableFieldCount", event.target.value)} /></label>
-              <label className="rule-toggle">Attributes required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.attributes.required} onChange={(event) => setDianxiaomiRequirementRequired("attributes", event.target.checked)} /></label>
-              <label>Minimum attributes<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.attributes.minCount} onChange={(event) => setDianxiaomiRequirementNumber("attributes", "minCount", event.target.value)} /></label>
-              <label>Recommended attribute keys<textarea className="compact-textarea" value={dianxiaomiRecommendedKeysText} onChange={(event) => setDianxiaomiRecommendedKeysText(event.target.value)} /></label>
-              <label className="rule-toggle">Compliance required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.compliance.required} onChange={(event) => setDianxiaomiRequirementRequired("compliance", event.target.checked)} /></label>
-              <label>Blocked compliance terms<textarea className="compact-textarea" value={dianxiaomiBlockedTermsText} onChange={(event) => setDianxiaomiBlockedTermsText(event.target.value)} /></label>
-            </div>
-            <button className="primary-button import-button" onClick={() => {
-              const input = buildDianxiaomiRequirementRulesPayload()
-              if (input) void dianxiaomiRequirementRulesUpdater.mutateAsync(input)
-            }} disabled={dianxiaomiRequirementRulesUpdater.isPending || !dianxiaomiRequirementRulesDraft.presetName.trim()}>
-              {dianxiaomiRequirementRulesUpdater.isPending ? "保存中..." : "保存上品规则"}
-            </button>
-          </div>
-        ) : null}
-
-        <div className="queue-panel">
-          <div className="queue-head">
-            <strong>店小秘采集</strong>
-            <p>{dianxiaomiCollectedProducts.length} 个来自浏览器插件的采集商品，当前范围 {selectedQueueScopeSummary}。</p>
-          </div>
-          <div className="collected-product-list">
-            {dianxiaomiCollectedProducts.length > 0 ? dianxiaomiCollectedProducts.slice(0, 6).map((product) => (
-              <div key={product.id} className="collected-product-item">
-                <div>
-                  <strong>{product.title}</strong>
-                  <span>{product.category} / {product.storeName ?? product.storeId ?? "未知店铺"}</span>
-                  <small>{new Date(product.collectedAt).toLocaleString()} / {product.quality.status} {product.quality.score}% / SKU {product.skus.length} / images {product.images.length}</small>
-                  {product.quality.checks.some((check) => !check.ok) ? (
-                    <small>{product.quality.checks.filter((check) => !check.ok).map((check) => check.message).join(" / ")}</small>
-                  ) : null}
-                </div>
-                <button
-                  className="ghost-button small-button"
-                  onClick={() => void dianxiaomiCollectedTaskCreator.mutateAsync(product.id)}
-                  disabled={dianxiaomiCollectedTaskCreator.isPending}
-                >
-                  生成任务
-                </button>
-              </div>
-            )) : (
-              <div className="empty-report">暂无店小秘采集商品，在插件面板点击“采集商品”。</div>
-            )}
-          </div>
-        </div>
-
-        <div className="queue-panel">
-          <div className="queue-head">
-            <strong>手动录入</strong>
-            <p>临时录入一个商品，可填写多 SKU。</p>
-          </div>
-          <div className="pricing-form">
-            <label>商品标题<input value={manualProduct.title} onChange={(event) => setManualField("title", event.target.value)} /></label>
-            <label>类目<input value={manualProduct.category} onChange={(event) => setManualField("category", event.target.value)} /></label>
-            <label>默认 SKU 名称<input value={manualProduct.skuName ?? ""} onChange={(event) => setManualField("skuName", event.target.value)} /></label>
-            <label>成本价 CNY<input type="number" step="0.01" value={manualProduct.supplierPriceCny} onChange={(event) => setManualField("supplierPriceCny", event.target.value)} /></label>
-            <label>国内运费 CNY<input type="number" step="0.01" value={manualProduct.estimatedDomesticShippingCny} onChange={(event) => setManualField("estimatedDomesticShippingCny", event.target.value)} /></label>
-            <label>重量 kg<input type="number" step="0.01" value={manualProduct.estimatedWeightKg} onChange={(event) => setManualField("estimatedWeightKg", event.target.value)} /></label>
-            <label>库存<input type="number" step="1" value={manualProduct.stock} onChange={(event) => setManualField("stock", event.target.value)} /></label>
-            <label>来源链接<input value={manualProduct.sourceUrl ?? ""} onChange={(event) => setManualField("sourceUrl", event.target.value)} /></label>
-            <label>商品属性<textarea className="compact-textarea" placeholder="颜色:灰色;材质:尼龙" value={manualAttributesText} onChange={(event) => setManualAttributesText(event.target.value)} /></label>
-            <label>图片链接<textarea className="compact-textarea" placeholder="多个链接用换行、逗号或分号分隔" value={manualImagesText} onChange={(event) => setManualImagesText(event.target.value)} /></label>
-            <label>SKU 列表<textarea className="compact-textarea" placeholder="SKU名,成本价,库存,属性。例如：灰色 M,12.9,100,颜色:灰色;尺码:M" value={manualSkusText} onChange={(event) => setManualSkusText(event.target.value)} /></label>
-          </div>
-          <button className="primary-button import-button" onClick={() => void manualCreator.mutateAsync(buildManualProductPayload())} disabled={manualCreator.isPending || !manualProduct.title || !manualProduct.category}>
-            {manualCreator.isPending ? "创建中..." : "创建手动任务"}
-          </button>
-        </div>
-
-        <div className="queue-panel">
-          <div className="queue-head">
-            <strong>CSV / Excel 导入</strong>
-            <p>一行一个 SKU，同名商品会合并为一个任务。</p>
-          </div>
-          <a className="template-link" href={csvTemplateUrl}>下载 CSV 模板</a>
-          <textarea className="csv-import-box" value={csvText} onChange={(event) => setCsvText(event.target.value)} />
-          <button className="primary-button import-button" onClick={() => void csvImporter.mutateAsync(csvText)} disabled={csvImporter.isPending}>
-            {csvImporter.isPending ? "导入中..." : "导入 CSV 商品"}
-          </button>
-          {csvImporter.data ? <ImportResult result={csvImporter.data} prefix="CSV" /> : null}
-          <div className="excel-import-row">
-            <input type="file" accept=".xlsx" onChange={(event) => setSelectedExcelFile(event.target.files?.[0] ?? null)} />
-            <button className="ghost-button import-button" onClick={() => selectedExcelFile && void excelImporter.mutateAsync(selectedExcelFile)} disabled={!selectedExcelFile || excelImporter.isPending}>
-              {excelImporter.isPending ? "上传中..." : "导入 Excel"}
-            </button>
-          </div>
-          {excelImporter.data ? <ImportResult result={excelImporter.data} prefix="Excel" /> : null}
-        </div>
-
-        {pricingDraft ? (
-          <div className="queue-panel">
-            <div className="queue-head">
-              <strong>核价规则</strong>
-              <p>保存后会重新计算待执行任务的价格。</p>
-            </div>
-            <div className="pricing-form">
-              <label>汇率 CNY/USD<input type="number" step="0.01" value={pricingDraft.exchangeRateCnyPerUsd} onChange={(event) => setPricingField("exchangeRateCnyPerUsd", event.target.value)} /></label>
-              <label>物流 USD/kg<input type="number" step="0.01" value={pricingDraft.logisticsUsdPerKg} onChange={(event) => setPricingField("logisticsUsdPerKg", event.target.value)} /></label>
-              <label>平台费 USD<input type="number" step="0.01" value={pricingDraft.platformFeeUsd} onChange={(event) => setPricingField("platformFeeUsd", event.target.value)} /></label>
-              <label>目标毛利率<input type="number" step="0.01" value={pricingDraft.targetMarginRate} onChange={(event) => setPricingField("targetMarginRate", event.target.value)} /></label>
-              <label>售价倍数<input type="number" step="0.01" value={pricingDraft.priceMultiplier} onChange={(event) => setPricingField("priceMultiplier", event.target.value)} /></label>
-              <label>最低毛利率<input type="number" step="0.01" value={pricingDraft.minimumMarginRate} onChange={(event) => setPricingField("minimumMarginRate", event.target.value)} /></label>
-              <label>最低建议售价 USD<input type="number" step="0.01" value={pricingDraft.minimumSuggestedPriceUsd} onChange={(event) => setPricingField("minimumSuggestedPriceUsd", event.target.value)} /></label>
-              <label>物流分段<textarea className="compact-textarea" placeholder="最小重量,最大重量,基础费,每kg费用。例如：0,0.25,0.35,3.6" value={logisticsTiersText} onChange={(event) => setLogisticsTiersText(event.target.value)} /></label>
-            </div>
-            <button className="primary-button import-button" onClick={() => {
-              const input = buildPricingPayload()
-              if (input) void pricingUpdater.mutateAsync(input)
-            }} disabled={pricingUpdater.isPending}>
-              {pricingUpdater.isPending ? "保存中..." : "保存核价规则"}
-            </button>
-          </div>
-        ) : null}
-      </aside>
-
-      <main className="workspace">
-        <div className="advanced-console-bar">
-          <span>高级区默认隐藏，新增人工步骤前必须有自动化替代计划和下线时间。</span>
-        </div>
-        <section className="panel advanced-recovery-panel">
-          <div className="panel-head split-head">
-            <div>
-              <h3>故障恢复批跑</h3>
-              <p className="subtle">这里只处理 auto-ready 且浏览器可执行的 blocked 商品，repair 工具仅用于故障恢复。</p>
-            </div>
-            <button
-              className="primary-button small-button"
-              onClick={() => void automationRecoveryRunner.mutateAsync(defaultRecoveryRunInput)}
-              disabled={automationRecoveryRunner.isPending || displayedBrowserRecoveryCandidateCount === 0}
-            >
-                {automationRecoveryRunner.isPending ? "starting recovery..." : "Run recovery (" + String(displayedBrowserRecoveryCandidateCount) + ")"}
-            </button>
-          </div>
-          <div className="daily-status-strip advanced-recovery-stats">
-            <DailyMetric label="released retry" value={String(releasedBrowserRecoveryCandidateCount)} detail="one item per daemon tick" tone={releasedBrowserRecoveryCandidateCount > 0 ? "warn" : "neutral"} />
-            <DailyMetric label="浏览器恢复" value={String(displayedBrowserRecoveryCandidateCount)} detail="repair-preview / repair-apply / full-flow" tone={displayedBrowserRecoveryCandidateCount > 0 ? "good" : "neutral"} />
-            <DailyMetric label="暂停恢复" value={String(pausedBrowserRecoveryCandidateCount)} detail="重复失败预算保护" tone={pausedBrowserRecoveryCandidateCount > 0 ? "warn" : "neutral"} />
-            <DailyMetric label="直接安全重试" value={String(directSafeRetryCandidateCount)} detail="无需字段或图片修复" tone={directSafeRetryCandidateCount > 0 ? "warn" : "neutral"} />
-            <DailyMetric label="失败队列" value={String(scopeBlockedCount)} detail="不计入日常主路径 KPI" tone={scopeBlockedCount > 0 ? "warn" : "neutral"} />
-            <DailyMetric label="恢复批次" value={String(automationRecoveryRunsInScope.length)} detail={automationRecoveryRunsInScope[0] ? automationRecoveryRunsInScope[0].status : "暂无恢复运行"} tone={automationRecoveryRunsInScope[0]?.status === "failed" ? "bad" : automationRecoveryRunsInScope[0]?.status === "completed" ? "good" : "neutral"} />
-          </div>
-          {automationRecoveryRunMessage ? (
-            <div className="import-result">
-              <p>{automationRecoveryRunMessage}</p>
-            </div>
-          ) : null}
-          {automationRecoveryRunsInScope.length > 0 ? (
-            <div className="report-list">
-              {automationRecoveryRunsInScope.slice(0, 3).map((run) => <RecoveryRunCard key={run.id} run={run} />)}
-            </div>
-          ) : (
-            <div className="empty-report">暂无恢复批跑记录。</div>
-          )}
-        </section>
-        {activeTask ? (
-          <>
+              </aside>
+              <main className="workspace">
+                {activeTask ? (
+                  <>
             <section className="hero-panel">
               <div className="hero-copy">
                 <p className="eyebrow">当前商品</p>
@@ -3640,7 +3353,7 @@ export function App() {
               <article className="panel">
                 <div className="panel-head"><h3>审核工作台</h3></div>
                 <div className="review-history">
-                  <strong>閸欐垵绔烽崜宥嗩梾閺?</strong>
+                  <strong>发布前检查</strong>
                   {publishCheck ? (
                     <>
                       <div className={"review-state " + (publishCheck.canPublish ? "approved" : "rejected")}>
@@ -4265,7 +3978,313 @@ export function App() {
                 }) : <div className="empty-report">暂无自动化执行报告。</div>}
               </div>
             </section>
-
+                  </>
+                ) : (
+          <section className="hero-panel">
+            <div className="hero-copy">
+              <h2>暂无商品任务</h2>
+              <p className="subtle">导入或手动录入商品后会显示任务。</p>
+            </div>
+          </section>
+                )}
+              </main>
+            </div>
+          ) : advancedTab === "intake" ? (
+            <div className="advanced-grid">
+        <div className="queue-panel">
+          <div className="queue-head">
+            <strong>店小秘编辑队列</strong>
+            <p>{scopeWorkItemCount} 个店小秘商品待按需求规则编辑，当前范围 {selectedQueueScopeSummary}。</p>
+          </div>
+          {imageCheckMessage ? (
+            <div className="import-result">
+              <p>{imageCheckMessage}</p>
+            </div>
+          ) : null}
+          {repairMessage ? (
+            <div className="import-result">
+              <p>{repairMessage}</p>
+            </div>
+          ) : null}
+          <div className="collected-product-list">
+            {dianxiaomiProductWorkItems.length > 0 ? dianxiaomiProductWorkItems.slice(0, 6).map((item) => (
+              <div key={item.id} className="collected-product-item">
+                {(() => {
+                  const latestImageCheckJob = latestImageCheckJobByWorkItemId.get(item.id) ?? null
+                  const latestRepairPreviewJob = latestRepairPreviewJobByWorkItemId.get(item.id) ?? null
+                  const latestRepairApplyJob = latestRepairApplyJobByWorkItemId.get(item.id) ?? null
+                  const imageCheckIssues = item.snapshot.imageCheck?.issues ?? []
+                  const repairActions = item.repairPlan?.actions ?? []
+                  const autoRepairable = item.repairPlan?.status === "auto-ready"
+                    && item.repairPlan.canAutoRepair
+                    && repairActions.length > 0
+                    && repairActions.every((action) => action.automation === "auto")
+                  const repairRunning = latestRepairApplyJob?.status === "running" || latestRepairPreviewJob?.status === "running"
+                  const repairToolSummary = repairActions
+                    .filter((action) => action.payload?.writer === "run-media-tool")
+                    .map((action) => action.payload?.mediaTool ?? action.tool ?? action.target ?? action.label)
+                    .filter(Boolean)
+                    .join(" / ")
+                  return (
+                    <>
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>{item.pageProfile ?? "店小秘商品"} / {item.status} / {item.storeName ?? item.storeId ?? "未知店铺"}</span>
+                  <small>{new Date(item.updatedAt).toLocaleString()} / 必检 {item.requirements.summary.requiredPassed}/{item.requirements.summary.requiredTotal} / SKU {item.snapshot.skuCount} / 图片 {item.snapshot.imageCount}</small>
+                  {item.snapshot.imageCheck ? (
+                    <small>
+                      图片检查：{item.snapshot.imageCheck.passed ? "通过" : imageCheckIssues.length > 0 ? imageCheckIssues.map((issue) => issue.category + " " + issue.issue).join(" / ") : "失败"}
+                    </small>
+                  ) : null}
+                  {latestImageCheckJob ? (
+                    <small>
+                      最近图片检查：{latestImageCheckJob.status}{latestImageCheckJob.result ? latestImageCheckJob.result.passed ? " / 通过" : " / " + latestImageCheckJob.result.summary.join(" / ") : ""}
+                    </small>
+                  ) : null}
+                  {item.repairPlan ? (
+                    <small>
+                      修复计划：{item.repairPlan.status} / {item.repairPlan.summary}{repairToolSummary ? " / " + repairToolSummary : ""}
+                    </small>
+                  ) : null}
+                  {latestRepairPreviewJob ? (
+                    <small>
+                      最近预修复：{latestRepairPreviewJob.status}{latestRepairPreviewJob.reportStatus ? " / " + latestRepairPreviewJob.reportStatus : ""}
+                    </small>
+                  ) : null}
+                  {latestRepairApplyJob ? (
+                    <small>
+                      最近执行修复：{latestRepairApplyJob.status}{latestRepairApplyJob.reportStatus ? " / " + latestRepairApplyJob.reportStatus : ""}
+                    </small>
+                  ) : null}
+                  {item.suggestedEdits.length > 0 ? (
+                    <small>{item.suggestedEdits.slice(0, 3).map((edit) => edit.field + ": " + (edit.suggestedValue || edit.reason)).join(" / ")}</small>
+                  ) : null}
+                </div>
+                <div className="task-export-actions">
+                  <button
+                    className="ghost-button small-button"
+                    onClick={() => window.open(item.pageUrl, "_blank", "noopener,noreferrer")}
+                  >
+                    打开页面
+                  </button>
+                  <button
+                    className="ghost-button small-button"
+                    onClick={() => void dianxiaomiImageChecker.mutateAsync({ workItemId: item.id })}
+                    disabled={dianxiaomiImageChecker.isPending || latestImageCheckJob?.status === "running"}
+                  >
+                    {latestImageCheckJob?.status === "running" ? "检查中..." : "图片检查"}
+                  </button>
+                  <button
+                    className="ghost-button small-button"
+                    onClick={() => void dianxiaomiRepairPreviewRunner.mutateAsync({ workItemId: item.id })}
+                    disabled={!item.repairPlan || repairRunning || dianxiaomiRepairPreviewRunner.isPending}
+                  >
+                    {latestRepairPreviewJob?.status === "running" ? "预览中..." : "预修复"}
+                  </button>
+                  <button
+                    className="primary-button small-button"
+                    onClick={() => void dianxiaomiRepairApplyRunner.mutateAsync({ workItemId: item.id })}
+                    disabled={!autoRepairable || repairRunning || dianxiaomiRepairApplyRunner.isPending}
+                  >
+                    {latestRepairApplyJob?.status === "running" ? "修复中..." : "执行自动修复"}
+                  </button>
+                  <button
+                    className="ghost-button small-button"
+                    onClick={() => void dianxiaomiWorkItemTaskCreator.mutateAsync(item.id)}
+                    disabled={dianxiaomiWorkItemTaskCreator.isPending}
+                  >
+                    生成编辑任务
+                  </button>
+                </div>
+                    </>
+                  )
+                })()}
+              </div>
+            )) : (
+              <div className="empty-report">打开店小秘采集/商品编辑页，点击插件按钮即可加入这里。</div>
+            )}
+          </div>
+        </div>
+        <div className="queue-panel">
+          <div className="queue-head">
+            <strong>店小秘采集</strong>
+            <p>{dianxiaomiCollectedProducts.length} 个来自浏览器插件的采集商品，当前范围 {selectedQueueScopeSummary}。</p>
+          </div>
+          <div className="collected-product-list">
+            {dianxiaomiCollectedProducts.length > 0 ? dianxiaomiCollectedProducts.slice(0, 6).map((product) => (
+              <div key={product.id} className="collected-product-item">
+                <div>
+                  <strong>{product.title}</strong>
+                  <span>{product.category} / {product.storeName ?? product.storeId ?? "未知店铺"}</span>
+                  <small>{new Date(product.collectedAt).toLocaleString()} / {product.quality.status} {product.quality.score}% / SKU {product.skus.length} / images {product.images.length}</small>
+                  {product.quality.checks.some((check) => !check.ok) ? (
+                    <small>{product.quality.checks.filter((check) => !check.ok).map((check) => check.message).join(" / ")}</small>
+                  ) : null}
+                </div>
+                <button
+                  className="ghost-button small-button"
+                  onClick={() => void dianxiaomiCollectedTaskCreator.mutateAsync(product.id)}
+                  disabled={dianxiaomiCollectedTaskCreator.isPending}
+                >
+                  生成任务
+                </button>
+              </div>
+            )) : (
+              <div className="empty-report">暂无店小秘采集商品，在插件面板点击“采集商品”。</div>
+            )}
+          </div>
+        </div>
+        <div className="queue-panel">
+          <div className="queue-head">
+            <strong>手动录入</strong>
+            <p>临时录入一个商品，可填写多 SKU。</p>
+          </div>
+          <div className="pricing-form">
+            <label>商品标题<input value={manualProduct.title} onChange={(event) => setManualField("title", event.target.value)} /></label>
+            <label>类目<input value={manualProduct.category} onChange={(event) => setManualField("category", event.target.value)} /></label>
+            <label>默认 SKU 名称<input value={manualProduct.skuName ?? ""} onChange={(event) => setManualField("skuName", event.target.value)} /></label>
+            <label>成本价 CNY<input type="number" step="0.01" value={manualProduct.supplierPriceCny} onChange={(event) => setManualField("supplierPriceCny", event.target.value)} /></label>
+            <label>国内运费 CNY<input type="number" step="0.01" value={manualProduct.estimatedDomesticShippingCny} onChange={(event) => setManualField("estimatedDomesticShippingCny", event.target.value)} /></label>
+            <label>重量 kg<input type="number" step="0.01" value={manualProduct.estimatedWeightKg} onChange={(event) => setManualField("estimatedWeightKg", event.target.value)} /></label>
+            <label>库存<input type="number" step="1" value={manualProduct.stock} onChange={(event) => setManualField("stock", event.target.value)} /></label>
+            <label>来源链接<input value={manualProduct.sourceUrl ?? ""} onChange={(event) => setManualField("sourceUrl", event.target.value)} /></label>
+            <label>商品属性<textarea className="compact-textarea" placeholder="颜色:灰色;材质:尼龙" value={manualAttributesText} onChange={(event) => setManualAttributesText(event.target.value)} /></label>
+            <label>图片链接<textarea className="compact-textarea" placeholder="多个链接用换行、逗号或分号分隔" value={manualImagesText} onChange={(event) => setManualImagesText(event.target.value)} /></label>
+            <label>SKU 列表<textarea className="compact-textarea" placeholder="SKU名,成本价,库存,属性。例如：灰色 M,12.9,100,颜色:灰色;尺码:M" value={manualSkusText} onChange={(event) => setManualSkusText(event.target.value)} /></label>
+          </div>
+          <button className="primary-button import-button" onClick={() => void manualCreator.mutateAsync(buildManualProductPayload())} disabled={manualCreator.isPending || !manualProduct.title || !manualProduct.category}>
+            {manualCreator.isPending ? "创建中..." : "创建手动任务"}
+          </button>
+        </div>
+        <div className="queue-panel">
+          <div className="queue-head">
+            <strong>CSV / Excel 导入</strong>
+            <p>一行一个 SKU，同名商品会合并为一个任务。</p>
+          </div>
+          <a className="template-link" href={csvTemplateUrl}>下载 CSV 模板</a>
+          <textarea className="csv-import-box" value={csvText} onChange={(event) => setCsvText(event.target.value)} />
+          <button className="primary-button import-button" onClick={() => void csvImporter.mutateAsync(csvText)} disabled={csvImporter.isPending}>
+            {csvImporter.isPending ? "导入中..." : "导入 CSV 商品"}
+          </button>
+          {csvImporter.data ? <ImportResult result={csvImporter.data} prefix="CSV" /> : null}
+          <div className="excel-import-row">
+            <input type="file" accept=".xlsx" onChange={(event) => setSelectedExcelFile(event.target.files?.[0] ?? null)} />
+            <button className="ghost-button import-button" onClick={() => selectedExcelFile && void excelImporter.mutateAsync(selectedExcelFile)} disabled={!selectedExcelFile || excelImporter.isPending}>
+              {excelImporter.isPending ? "上传中..." : "导入 Excel"}
+            </button>
+          </div>
+          {excelImporter.data ? <ImportResult result={excelImporter.data} prefix="Excel" /> : null}
+        </div>
+            </div>
+          ) : advancedTab === "config" ? (
+            <div className="advanced-grid">
+        {dianxiaomiRequirementRulesDraft ? (
+          <div className="queue-panel">
+            <div className="queue-head">
+              <strong>店小秘上品规则</strong>
+              <p>保存后会重新计算队列中的所有店小秘商品。</p>
+            </div>
+            <div className="pricing-form dianxiaomi-rules-form">
+              <label>预设名称<input value={dianxiaomiRequirementRulesDraft.presetName} onChange={(event) => setDianxiaomiRequirementPresetName(event.target.value)} /></label>
+              <label className="rule-toggle">Title required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.title.required} onChange={(event) => setDianxiaomiRequirementRequired("title", event.target.checked)} /></label>
+              <label>Title min length<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.title.minLength} onChange={(event) => setDianxiaomiRequirementNumber("title", "minLength", event.target.value)} /></label>
+              <label>Title max length<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.title.maxLength} onChange={(event) => setDianxiaomiRequirementNumber("title", "maxLength", event.target.value)} /></label>
+              <label className="rule-toggle">Images required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.images.required} onChange={(event) => setDianxiaomiRequirementRequired("images", event.target.checked)} /></label>
+              <label>Minimum images<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.images.minCount} onChange={(event) => setDianxiaomiRequirementNumber("images", "minCount", event.target.value)} /></label>
+              <label className="rule-toggle">Media rules required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.required} onChange={(event) => setDianxiaomiRequirementRequired("media", event.target.checked)} /></label>
+              <label className="rule-toggle">Use image translation<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.requireImageTranslation} onChange={(event) => setDianxiaomiMediaBoolean("requireImageTranslation", event.target.checked)} /></label>
+              <label>Image translation language<input value={dianxiaomiRequirementRulesDraft.media.targetLanguage} onChange={(event) => setDianxiaomiMediaText("targetLanguage", event.target.value)} /></label>
+              <label className="rule-toggle">Normalize image size<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.requireSizeNormalization} onChange={(event) => setDianxiaomiMediaBoolean("requireSizeNormalization", event.target.checked)} /></label>
+              <label>Minimum image width<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.media.minWidthPx} onChange={(event) => setDianxiaomiRequirementNumber("media", "minWidthPx", event.target.value)} /></label>
+              <label>Minimum image height<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.media.minHeightPx} onChange={(event) => setDianxiaomiRequirementNumber("media", "minHeightPx", event.target.value)} /></label>
+              <label>Maximum image width<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.media.maxWidthPx} onChange={(event) => setDianxiaomiRequirementNumber("media", "maxWidthPx", event.target.value)} /></label>
+              <label>Maximum image height<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.media.maxHeightPx} onChange={(event) => setDianxiaomiRequirementNumber("media", "maxHeightPx", event.target.value)} /></label>
+              <label>Maximum image size MB<input type="number" step="0.1" value={dianxiaomiRequirementRulesDraft.media.maxSizeMb} onChange={(event) => setDianxiaomiRequirementNumber("media", "maxSizeMb", event.target.value)} /></label>
+              <label className="rule-toggle">Require white background<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.requireWhiteBackground} onChange={(event) => setDianxiaomiMediaBoolean("requireWhiteBackground", event.target.checked)} /></label>
+              <label className="rule-toggle">Image editor review<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.media.requireImageEditorReview} onChange={(event) => setDianxiaomiMediaBoolean("requireImageEditorReview", event.target.checked)} /></label>
+              <label>Dianxiaomi media tools<textarea className="compact-textarea" value={dianxiaomiMediaToolsText} onChange={(event) => setDianxiaomiMediaToolsText(event.target.value)} /></label>
+              <label className="rule-toggle">SKU required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.sku.required} onChange={(event) => setDianxiaomiRequirementRequired("sku", event.target.checked)} /></label>
+              <label>Minimum SKU rows<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.sku.minCount} onChange={(event) => setDianxiaomiRequirementNumber("sku", "minCount", event.target.value)} /></label>
+              <label className="rule-toggle">Price required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.price.required} onChange={(event) => setDianxiaomiRequirementRequired("price", event.target.checked)} /></label>
+              <label>Minimum price fields<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.price.minEditableFieldCount} onChange={(event) => setDianxiaomiRequirementNumber("price", "minEditableFieldCount", event.target.value)} /></label>
+              <label className="rule-toggle">Stock required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.stock.required} onChange={(event) => setDianxiaomiRequirementRequired("stock", event.target.checked)} /></label>
+              <label>Minimum stock fields<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.stock.minEditableFieldCount} onChange={(event) => setDianxiaomiRequirementNumber("stock", "minEditableFieldCount", event.target.value)} /></label>
+              <label className="rule-toggle">Attributes required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.attributes.required} onChange={(event) => setDianxiaomiRequirementRequired("attributes", event.target.checked)} /></label>
+              <label>Minimum attributes<input type="number" step="1" value={dianxiaomiRequirementRulesDraft.attributes.minCount} onChange={(event) => setDianxiaomiRequirementNumber("attributes", "minCount", event.target.value)} /></label>
+              <label>Recommended attribute keys<textarea className="compact-textarea" value={dianxiaomiRecommendedKeysText} onChange={(event) => setDianxiaomiRecommendedKeysText(event.target.value)} /></label>
+              <label className="rule-toggle">Compliance required<input type="checkbox" checked={dianxiaomiRequirementRulesDraft.compliance.required} onChange={(event) => setDianxiaomiRequirementRequired("compliance", event.target.checked)} /></label>
+              <label>Blocked compliance terms<textarea className="compact-textarea" value={dianxiaomiBlockedTermsText} onChange={(event) => setDianxiaomiBlockedTermsText(event.target.value)} /></label>
+            </div>
+            <button className="primary-button import-button" onClick={() => {
+              const input = buildDianxiaomiRequirementRulesPayload()
+              if (input) void dianxiaomiRequirementRulesUpdater.mutateAsync(input)
+            }} disabled={dianxiaomiRequirementRulesUpdater.isPending || !dianxiaomiRequirementRulesDraft.presetName.trim()}>
+              {dianxiaomiRequirementRulesUpdater.isPending ? "保存中..." : "保存上品规则"}
+            </button>
+          </div>
+        ) : null}
+        {pricingDraft ? (
+          <div className="queue-panel">
+            <div className="queue-head">
+              <strong>核价规则</strong>
+              <p>保存后会重新计算待执行任务的价格。</p>
+            </div>
+            <div className="pricing-form">
+              <label>汇率 CNY/USD<input type="number" step="0.01" value={pricingDraft.exchangeRateCnyPerUsd} onChange={(event) => setPricingField("exchangeRateCnyPerUsd", event.target.value)} /></label>
+              <label>物流 USD/kg<input type="number" step="0.01" value={pricingDraft.logisticsUsdPerKg} onChange={(event) => setPricingField("logisticsUsdPerKg", event.target.value)} /></label>
+              <label>平台费 USD<input type="number" step="0.01" value={pricingDraft.platformFeeUsd} onChange={(event) => setPricingField("platformFeeUsd", event.target.value)} /></label>
+              <label>目标毛利率<input type="number" step="0.01" value={pricingDraft.targetMarginRate} onChange={(event) => setPricingField("targetMarginRate", event.target.value)} /></label>
+              <label>售价倍数<input type="number" step="0.01" value={pricingDraft.priceMultiplier} onChange={(event) => setPricingField("priceMultiplier", event.target.value)} /></label>
+              <label>最低毛利率<input type="number" step="0.01" value={pricingDraft.minimumMarginRate} onChange={(event) => setPricingField("minimumMarginRate", event.target.value)} /></label>
+              <label>最低建议售价 USD<input type="number" step="0.01" value={pricingDraft.minimumSuggestedPriceUsd} onChange={(event) => setPricingField("minimumSuggestedPriceUsd", event.target.value)} /></label>
+              <label>物流分段<textarea className="compact-textarea" placeholder="最小重量,最大重量,基础费,每kg费用。例如：0,0.25,0.35,3.6" value={logisticsTiersText} onChange={(event) => setLogisticsTiersText(event.target.value)} /></label>
+            </div>
+            <button className="primary-button import-button" onClick={() => {
+              const input = buildPricingPayload()
+              if (input) void pricingUpdater.mutateAsync(input)
+            }} disabled={pricingUpdater.isPending}>
+              {pricingUpdater.isPending ? "保存中..." : "保存核价规则"}
+            </button>
+          </div>
+        ) : null}
+            </div>
+          ) : (
+            <div className="advanced-grid">
+        <section className="panel advanced-recovery-panel">
+          <div className="panel-head split-head">
+            <div>
+              <h3>故障恢复批跑</h3>
+              <p className="subtle">这里只处理 auto-ready 且浏览器可执行的 blocked 商品，repair 工具仅用于故障恢复。</p>
+            </div>
+            <button
+              className="primary-button small-button"
+              onClick={() => void automationRecoveryRunner.mutateAsync(defaultRecoveryRunInput)}
+              disabled={automationRecoveryRunner.isPending || displayedBrowserRecoveryCandidateCount === 0}
+            >
+                {automationRecoveryRunner.isPending ? "starting recovery..." : "Run recovery (" + String(displayedBrowserRecoveryCandidateCount) + ")"}
+            </button>
+          </div>
+          <div className="daily-status-strip advanced-recovery-stats">
+            <DailyMetric label="released retry" value={String(releasedBrowserRecoveryCandidateCount)} detail="one item per daemon tick" tone={releasedBrowserRecoveryCandidateCount > 0 ? "warn" : "neutral"} />
+            <DailyMetric label="浏览器恢复" value={String(displayedBrowserRecoveryCandidateCount)} detail="repair-preview / repair-apply / full-flow" tone={displayedBrowserRecoveryCandidateCount > 0 ? "good" : "neutral"} />
+            <DailyMetric label="暂停恢复" value={String(pausedBrowserRecoveryCandidateCount)} detail="重复失败预算保护" tone={pausedBrowserRecoveryCandidateCount > 0 ? "warn" : "neutral"} />
+            <DailyMetric label="直接安全重试" value={String(directSafeRetryCandidateCount)} detail="无需字段或图片修复" tone={directSafeRetryCandidateCount > 0 ? "warn" : "neutral"} />
+            <DailyMetric label="失败队列" value={String(scopeBlockedCount)} detail="不计入日常主路径 KPI" tone={scopeBlockedCount > 0 ? "warn" : "neutral"} />
+            <DailyMetric label="恢复批次" value={String(automationRecoveryRunsInScope.length)} detail={automationRecoveryRunsInScope[0] ? automationRecoveryRunsInScope[0].status : "暂无恢复运行"} tone={automationRecoveryRunsInScope[0]?.status === "failed" ? "bad" : automationRecoveryRunsInScope[0]?.status === "completed" ? "good" : "neutral"} />
+          </div>
+          {automationRecoveryRunMessage ? (
+            <div className="import-result">
+              <p>{automationRecoveryRunMessage}</p>
+            </div>
+          ) : null}
+          {automationRecoveryRunsInScope.length > 0 ? (
+            <div className="report-list">
+              {automationRecoveryRunsInScope.slice(0, 3).map((run) => <RecoveryRunCard key={run.id} run={run} />)}
+            </div>
+          ) : (
+            <div className="empty-report">暂无恢复批跑记录。</div>
+          )}
+        </section>
             <section className="panel">
               <div className="panel-head split-head">
                 <h3>店小秘选择器诊断</h3>
@@ -4446,16 +4465,8 @@ export function App() {
                 }) : <div className="empty-report">暂无选择器诊断报告</div>}
               </div>
             </section>
-          </>
-        ) : (
-          <section className="hero-panel">
-            <div className="hero-copy">
-              <h2>暂无商品任务</h2>
-              <p className="subtle">导入或手动录入商品后会显示任务。</p>
             </div>
-          </section>
-        )}
-      </main>
+          )}
         </div>
       )}
       </div>
