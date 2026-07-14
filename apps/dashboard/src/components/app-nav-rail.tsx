@@ -19,11 +19,7 @@ export function AppNavRail({ active, onChange, statusLabel, statusTone }: AppNav
   return (
     <aside className="app-nav-rail">
       <div className="app-nav-brand">
-        <span className="app-nav-brand-mark">T</span>
-        <div>
-          <strong>Temu 上品</strong>
-          <span>自动上品控制台</span>
-        </div>
+        <img className="app-nav-brand-logo" src="/image.png" alt="LIVELY" />
       </div>
       <nav className="app-nav-list">
         {NAV_ITEMS.map((item) => (
