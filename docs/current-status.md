@@ -1,5 +1,16 @@
 # Current Status
 
+> Updated: 2026-07-15
+
+## 2026-07-15 更新
+
+- 新增 Electron 桌面应用 `apps/desktop`，可自动启动 server 和 dashboard。
+- 新增 Windows NSIS 安装包构建命令：`npm run dist:windows`。
+- 新增安装后环境检查：`npm install` 会检查 Node.js 20+ 并自动安装 Playwright Chromium。
+- Windows 安装包输出到 `apps/desktop/release/`，构建产物已忽略，不提交到 Git。
+- README 已补充客户安装说明和多平台多商品综合平台路线。
+- 多平台接入目前仍是规划，生产自动化默认仍只覆盖 Dianxiaomi/Temu；Amazon、Shopee、Lazada、速卖通、Shopify 尚未接入默认流程。
+
 Updated: 2026-06-10
 
 ## Completed In This Iteration
