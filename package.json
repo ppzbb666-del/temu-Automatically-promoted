@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
+    "postinstall": "node scripts/check-environment.mjs",
     "start": "npm run dev",
     "dev": "concurrently --names \"server,dash\" --prefix-colors \"cyan,magenta\" --kill-others-on-fail \"npm:dev:server\" \"npm:dev:dashboard\"",
     "dev:dashboard": "npm run dev --workspace @temu-ai-ops/dashboard",
