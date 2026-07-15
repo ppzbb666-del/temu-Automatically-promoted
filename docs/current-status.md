@@ -11,8 +11,6 @@
 - README 已补充客户安装说明和多平台多商品综合平台路线。
 - 多平台接入目前仍是规划，生产自动化默认仍只覆盖 Dianxiaomi/Temu；Amazon、Shopee、Lazada、速卖通、Shopify 尚未接入默认流程。
 
-Updated: 2026-06-10
-
 ## Completed In This Iteration
 
 - Dianxiaomi automation target-url safety is stricter now:
