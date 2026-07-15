@@ -25,11 +25,12 @@ AI 编排目前仍为 mock（[`packages/shared/src/mock.ts`](packages/shared/src
 
 ```bash
 npm install                    # 安装 workspaces
-npm run dev:server             # http://localhost:8787
-npm run dev:dashboard          # http://localhost:5173
+npm run dev                    # 一条命令同时启动 server(8787) + dashboard(5173)
+                               #   → 日志前缀 [server] / [dash]，一个 Ctrl+C 全停
 
 # 单独子包
-npm run dev --workspace @temu-ai-ops/server
+npm run dev:server             # http://localhost:8787
+npm run dev:dashboard          # http://localhost:5173
 npm run build --workspace @temu-ai-ops/extension   # MV3 manifest 校验 + 复制到 dist/
 npm test  --workspace @temu-ai-ops/extension      # 含面板 Playwright 校验
 ```

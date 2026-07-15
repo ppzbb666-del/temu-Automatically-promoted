@@ -50,13 +50,17 @@ docs/              规划与运行手册
 
 ## 快速开始
 
-完整开发命令、API 速查、环境变量、文档索引见 [CLAUDE.md](CLAUDE.md)。常用三条：
+完整开发命令、API 速查、环境变量、文档索引见 [CLAUDE.md](CLAUDE.md)。**一条命令启动全部**：
 
 ```bash
 npm install
-npm run dev:server      # http://localhost:8787
-npm run dev:dashboard   # http://localhost:5173
+npm run dev      # 同时启动服务端(8787) + 控制台(5173)，一个 Ctrl+C 全停
 ```
+
+- 服务端：http://localhost:8787 （健康检查 `GET /health`）
+- 控制台：http://localhost:5173
+
+> 日志会以 `[server]` / `[dash]` 前缀区分两个服务。如需单独启动仍可用 `npm run dev:server` 或 `npm run dev:dashboard`。
 
 加载已解压扩展程序时指向 `apps/extension/dist`（先 `npm run build --workspace @temu-ai-ops/extension`）。
 
