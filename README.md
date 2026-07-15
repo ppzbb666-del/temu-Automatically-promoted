@@ -88,3 +88,26 @@ npm run dev      # 同时启动服务端(8787) + 控制台(5173)，一个 Ctrl+C
 - **行尾**：`.gitattributes` 锁 LF（`core.autocrlf=true` 在 Windows 工作树保留 CRLF，仓库内强制 LF）
 - **远端**：已配置 `origin` → `https://github.com/ppzbb666-del/Auto_goods.git`
 - **CI / pre-commit hook**：未配置
+
+## Windows 客户安装版
+
+项目已提供 Electron 桌面应用和 Windows NSIS 安装包构建流程。客户不需要单独安装 Node.js、npm 或 Playwright；开发机执行 `npm install` 时会自动检查 Node.js 版本并安装 Playwright Chromium。
+
+```bash
+# 生成 Windows 安装包
+npm run dist:windows
+```
+
+安装包输出在 `apps/desktop/release/Temu-AI-Ops-Setup-<version>.exe`。桌面应用会自动启动内置 server 和 dashboard，并在关闭时回收后台进程。正式发布前还需要配置品牌图标、Windows 代码签名和自动更新服务。
+
+## 多平台多商品综合平台路线
+
+当前生产自动化仍以 Dianxiaomi/Temu 为主，但商品、定价、内容、任务队列和平台字段已经具备复用基础。后续综合平台按以下边界演进：
+
+1. 建立统一商品中心，管理一个商品的标题、描述、图片、SKU、库存、成本和价格。
+2. 为每个平台建立字段映射和校验规则，处理标题长度、属性、图片、物流和定价差异。
+3. 通过平台适配器接入 Amazon、Shopee、Lazada、速卖通、Shopify 等渠道；每个平台独立维护登录、草稿、发布和反馈状态。
+4. 建立多平台任务队列，支持批量选择商品、预览差异、失败重试、人工确认和逐平台审计。
+5. 将平台发布状态回写统一商品中心，避免同一商品在多个平台之间产生不可追踪的版本。
+
+该路线目前是产品规划，不代表上述平台已经接入；未经平台适配器和真实页面校准的渠道不会进入默认无人值守流程。

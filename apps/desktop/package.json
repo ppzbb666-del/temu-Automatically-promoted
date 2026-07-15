@@ -1,0 +1,39 @@
+{
+  "name": "@temu-ai-ops/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/main.cjs",
+  "scripts": {
+    "build": "npm run build --workspace @temu-ai-ops/dashboard && npm run build --workspace @temu-ai-ops/server",
+    "start": "electron .",
+    "dist": "npm run build && electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "36.9.5",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.temu.aiops",
+    "productName": "Temu AI Ops",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "../../apps/dashboard/dist/**/*",
+      "../../apps/server/dist/**/*",
+      "../../packages/shared/src/**/*"
+    ],
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "Temu-AI-Ops-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

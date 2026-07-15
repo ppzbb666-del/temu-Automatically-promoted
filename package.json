@@ -13,6 +13,8 @@
     "dev:dashboard": "npm run dev --workspace @temu-ai-ops/dashboard",
     "dev:server": "npm run dev --workspace @temu-ai-ops/server",
     "build": "npm run build --workspaces --if-present",
+    "build:desktop": "npm run build --workspace @temu-ai-ops/desktop",
+    "dist:windows": "npm run dist --workspace @temu-ai-ops/desktop",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm test --workspaces --if-present",
     "test:smoke": "npm run test:smoke --workspace @temu-ai-ops/server"
